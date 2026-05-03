@@ -20,6 +20,13 @@
 
 namespace {
 
+// Runtime layout:
+// - the timer ISR generates step pulses and updates the raw cart step count
+// - the motion task owns manual speed changes plus HOME/CENTER sequences
+// - the teacher and telemetry tasks sample the AS5600 and publish controller state
+// - the serial task parses the line-oriented console into motion and control commands
+
+// Bench configuration: pin map, motion limits, sensor bus, and task cadence.
 constexpr gpio_num_t kStepPin = GPIO_NUM_25;
 constexpr gpio_num_t kDirPin = GPIO_NUM_26;
 constexpr gpio_num_t kDirAltPin = GPIO_NUM_33;
@@ -120,6 +127,7 @@ struct SensorSnapshot {
     ControllerMode controllerMode = ControllerMode::Manual;
 };
 
+// Shared motion, calibration, and telemetry state accessed across tasks and the timer ISR.
 char g_commandBuffer[kCommandBufferSize] = {};
 size_t g_commandLength = 0U;
 bool g_commandOverflow = false;
@@ -166,6 +174,7 @@ SensorSnapshot g_latestSensorSnapshot = {};
 float g_teacherLqrGain[kStateDimension] = {0.0f, 0.0f, 0.0f, 0.0f};
 bool g_telemetryHeaderPrinted = false;
 
+// Utility helpers keep unit conversions and synchronized state access consistent.
 uint32_t max_u32(uint32_t lhs, uint32_t rhs)
 {
     return (lhs > rhs) ? lhs : rhs;
@@ -508,6 +517,7 @@ bool motion_sequence_abort_requested()
     return abortRequested;
 }
 
+// Motion safety and sensor sampling convert raw hardware state into safe commands and controller inputs.
 int32_t apply_motion_safety(int32_t requestedSignedStepRate)
 {
     const int32_t clampedRequestedRate = clamp_signed_step_rate(requestedSignedStepRate);
@@ -879,6 +889,7 @@ int32_t compute_teacher_command_steps_per_second(const SensorSnapshot& snapshot)
     return static_cast<int32_t>(lroundf(requestedStepsPerSecond));
 }
 
+// Low-level GPIO and timer helpers directly drive the TB6600 step and direction signals.
 int32_t current_signed_step_rate()
 {
     portENTER_CRITICAL(&g_motionMux);
@@ -1005,6 +1016,7 @@ char* trim_in_place(char* text)
     return text;
 }
 
+// Human-facing console commands map to motion requests, calibration, and teacher control settings.
 void print_help()
 {
     Serial.println("Commands:");
@@ -1618,6 +1630,7 @@ void poll_serial_commands()
     }
 }
 
+// Background tasks partition motion control, teacher updates, telemetry, and serial parsing.
 void motion_control_task(void* /*parameter*/)
 {
     MotionCommand motionCommand = {MotionCommandKind::Stop, 0};
