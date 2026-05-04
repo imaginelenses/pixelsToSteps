@@ -59,6 +59,8 @@ This file is the bench reference for the current ESP32 firmware in this repo.
 ## Position Convention
 
 - `kMillimetersPerStep = 0.0125 mm/step`
+- `METERS_PER_STEP = 0.0000125 m/step`
+- Offline simulation should assume a `0.30 m` total track length (`+/- 0.15 m` from center).
 - `cart_home_steps` means distance from the left home switch end.
 - `cart_center_steps` means distance from the calibrated midpoint.
 - `STATUS` reports `cart` in centered coordinates.
@@ -75,15 +77,17 @@ This file is the bench reference for the current ESP32 firmware in this repo.
 - `RESTANGLE` captures the pendulum-down resting angle as `+180 deg`.
 - Upright is `0 deg`.
 - Clockwise pendulum rotation is positive and counter-clockwise is negative.
-- `ANGLEZERO` is kept as an alias for `RESTANGLE`.
+- `ANGLEZERO` captures the current position as upright `0 deg` by default.
+- `ANGLEZERO REST` captures the current position as `+180 deg`.
+- `ZEROANGLE` is kept as an alias for `ANGLEZERO`.
 - `SENSOR` prints direct AS5600 bus diagnostics, including whether the device acknowledged on I2C.
 - Teacher control uses relative angle in radians after zeroing.
 
 ## Teacher State Vector
 
 - The teacher controller state is:
-  - `x[0] = cart position from center (meters)`
-  - `x[1] = cart velocity (meters/second)`
+  - `x[0] = cart position from center (steps)`
+  - `x[1] = cart velocity (steps/second)`
   - `x[2] = pole angle from upright zero (radians)`
   - `x[3] = pole angular velocity (radians/second)`
 - Teacher control law in firmware:
@@ -117,9 +121,10 @@ This file is the bench reference for the current ESP32 firmware in this repo.
 - `SPEED <signed_steps_per_sec>`
 - `STOP`
 - `RESTANGLE`
-- `ANGLEZERO` (alias for `RESTANGLE`)
+- `ANGLEZERO [UPRIGHT|REST]`
+- `ZEROANGLE [UPRIGHT|REST]` (alias for `ANGLEZERO`)
 - `SENSOR`
-- `SETK <cart_m> <cart_mps> <angle_rad> <angle_rate_radps>`
+- `SETK <cart_steps> <cart_steps_s> <angle_rad> <angle_rate_radps>`
 - `GAINS`
 - `TEACHER ON`
 - `TEACHER OFF`
@@ -132,7 +137,7 @@ This file is the bench reference for the current ESP32 firmware in this repo.
 - The first emitted header line is:
 
 ```text
-DATA_HEADER,timestamp_us,cart_home_steps,cart_center_steps,cart_home_mm,cart_center_mm,cart_vel_mm_s,angle_raw_counts,angle_deg,angle_rad,angle_vel_rad_s,command_steps_s,mode,homed,angle_zeroed
+DATA_HEADER,timestamp_us,cart_home_steps,cart_center_steps,cart_vel_steps_s,angle_raw_counts,angle_deg,angle_rad,angle_vel_rad_s,command_steps_s,mode,homed,angle_zeroed
 ```
 
 - Each data sample line starts with `DATA,`.

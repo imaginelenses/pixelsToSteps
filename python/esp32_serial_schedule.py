@@ -7,6 +7,8 @@ Usage:
     python esp32_serial_schedule.py /dev/cu.xxx  # specify port explicitly
 
 Edit COMMAND_SEQUENCE below to change which motor commands are sent and when.
+If the final schedule leaves telemetry enabled with `LOG ON`, the script keeps
+streaming the ESP32 output until Ctrl+C so log lines are not cut off.
 """
 
 import sys
@@ -81,6 +83,23 @@ def open_serial_port(port: str, baud_rate: int) -> serial.Serial:
     return ser
 
 
+def normalized_command(command: str) -> str:
+    """Normalize a console command for simple schedule-state checks."""
+    return command.strip().upper()
+
+
+def sequence_leaves_logging_enabled(command_sequence: Sequence[CommandStep]) -> bool:
+    """Return true when the scripted sequence ends with telemetry still enabled."""
+    logging_enabled = False
+    for _delay_s, command in command_sequence:
+        normalized = normalized_command(command)
+        if normalized == "LOG ON":
+            logging_enabled = True
+        elif normalized == "LOG OFF":
+            logging_enabled = False
+    return logging_enabled
+
+
 # RX rebuilds complete console lines from arbitrary serial chunks.
 def rx_thread(ser: serial.Serial, stop_event: threading.Event) -> None:
     """Read lines from the ESP32 and print them without blocking forever."""
@@ -138,13 +157,24 @@ def tx_thread(
         if stop_event.is_set():
             return
 
+        normalized = normalized_command(command)
+
         try:
-            ser.write((command.strip().upper() + "\n").encode("utf-8"))
+            ser.write((normalized + "\n").encode("utf-8"))
         except serial.SerialException:
             stop_event.set()
             return
 
-        print(f">>> {command.strip().upper()}", flush=True)
+        print(f">>> {normalized}", flush=True)
+
+    if sequence_leaves_logging_enabled(command_sequence):
+        print(
+            "Telemetry logging left ON by the schedule; streaming ESP32 output until Ctrl+C.",
+            flush=True,
+        )
+        while not stop_event.wait(POLL_INTERVAL_S):
+            pass
+        return
 
     stop_event.wait(POST_SEQUENCE_LISTEN_S)
     stop_event.set()

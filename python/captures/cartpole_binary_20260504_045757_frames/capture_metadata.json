@@ -1,0 +1,23 @@
+{
+  "capture_end_reason": "goal",
+  "capture_trace_csv": "capture_trace.csv",
+  "capture_wall_clock_duration_s": 2.786769,
+  "frame_height_px": 125,
+  "frame_rate_hz": 250.0,
+  "frame_width_px": 160,
+  "frames_captured": 863,
+  "goal_angle_deg": 1.0,
+  "goal_angle_rate_deg_s": 10.0,
+  "goal_definition": "abs(x) <= goal_position_steps and abs(x_dot) <= goal_velocity_steps_s and abs(theta) <= goal_angle_deg and abs(theta_dot) <= goal_angle_rate_deg_s for goal_hold_time_s",
+  "goal_hold_time_s": 0.25,
+  "goal_position_steps": 10.0,
+  "goal_reached_step": 863,
+  "goal_velocity_steps_s": 20.0,
+  "initial_angle_deg": -5.440141679931141,
+  "max_step_rate_steps_s": 12000.0,
+  "rollout_model": "nominal_linear",
+  "sample_time_s": 0.004,
+  "simulated_capture_duration_s": 3.452,
+  "steps_requested": 1500,
+  "teacher_controller_json": "teacher_lqr_controller.json"
+}

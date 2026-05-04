@@ -1,0 +1,119 @@
+{
+  "A": [
+    [
+      1.0,
+      0.0037448004287115766,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.8751733190429474,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      2.9299450623339753e-08,
+      1.000720821274454,
+      0.004000961048855348
+    ],
+    [
+      0.0,
+      1.4333151577733117e-05,
+      0.3604539295953456,
+      1.000720821274454
+    ]
+  ],
+  "B": [
+    [
+      0.00025519957128842375
+    ],
+    [
+      0.12482668095705257
+    ],
+    [
+      -2.9299450623339753e-08
+    ],
+    [
+      -1.4333151577733117e-05
+    ]
+  ],
+  "K": [
+    -2.172154012132311,
+    -2.726761671201171,
+    -297368.5449241923,
+    -31334.01262222372
+  ],
+  "Q_diag": [
+    5.3333333333333345e-06,
+    6.666666666666667e-07,
+    116.72200355597313,
+    1.6211389382774044
+  ],
+  "R": 1e-06,
+  "actuator_alpha": 0.12482668095705252,
+  "closed_loop_pole_magnitudes": [
+    0.8410831496315896,
+    0.9928626066461752,
+    0.9628846023758558,
+    0.9628846023758558
+  ],
+  "closed_loop_poles": [
+    {
+      "imag": 0.0,
+      "magnitude": 0.8410831496315896,
+      "real": 0.8410831496315896
+    },
+    {
+      "imag": 0.0,
+      "magnitude": 0.9928626066461752,
+      "real": 0.9928626066461752
+    },
+    {
+      "imag": 0.0009538699269806124,
+      "magnitude": 0.9628846023758558,
+      "real": 0.9628841299059158
+    },
+    {
+      "imag": -0.0009538699269806124,
+      "magnitude": 0.9628846023758558,
+      "real": 0.9628841299059158
+    }
+  ],
+  "control_law": "u = -Kx",
+  "control_rate_hz": 250.0,
+  "input_units": "steps_per_second",
+  "max_velocity_delta_steps_s": 600.0,
+  "params": {
+    "actuator_time_constant_s": 0.03,
+    "command_delay_s": 0.0,
+    "control_penalty_r": 1e-06,
+    "gravity_m_s2": 9.81,
+    "max_cart_accel_steps_s2": 150000.0,
+    "max_step_rate_steps_s": 12000.0,
+    "meters_per_step": 1.25e-05,
+    "pole_length_m": 0.13,
+    "pole_rod_mass_kg": 0.0095,
+    "pole_tip_mass_kg": 0.005,
+    "sample_time_s": 0.004,
+    "teacher_disable_angle_rad": 0.10471975511965978,
+    "teacher_disable_angle_rate_rad_s": 1.5707963267948966,
+    "teacher_enable_angle_rad": 0.05235987755982989,
+    "teacher_enable_angle_rate_rad_s": 0.7853981633974483,
+    "track_total_length_m": 0.3
+  },
+  "sample_time_s": 0.004,
+  "sign_report": {
+    "positive_theta_commands_positive_step_rate": true,
+    "positive_theta_rate_commands_positive_step_rate": true,
+    "theta_only_command_steps_s_per_rad": 297368.5449241923,
+    "theta_rate_only_command_steps_s_per_rad_s": 31334.01262222372
+  },
+  "state_order": [
+    "cart_position_steps",
+    "cart_velocity_steps_s",
+    "pole_angle_rad",
+    "pole_angle_rate_rad_s"
+  ]
+}

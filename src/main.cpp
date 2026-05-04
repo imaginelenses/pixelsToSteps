@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "generated_teacher_lqr_gains.h"
 #include "soc/gpio_struct.h"
 
 namespace {
@@ -49,14 +50,31 @@ constexpr uint32_t kTimerTickUs = 20;
 constexpr uint32_t kConsoleBaudRate = 460800;
 constexpr uint8_t kAs5600I2cAddress = 0x36;
 constexpr uint8_t kAs5600RawAngleHighRegister = 0x0C;
-constexpr uint32_t kAs5600I2cClockHz = 100000;
+constexpr uint32_t kAs5600I2cClockHz = 400000;
 constexpr uint32_t kAs5600I2cTimeoutMs = 2;
 
 constexpr int32_t kDefaultSignedStepRate = 0;
 constexpr uint32_t kMinStepRateHz = 10;
 constexpr uint32_t kMaxStepRateHz = 20000;
 constexpr uint32_t kLimitRecoveryRateHz = 300;
-constexpr uint32_t kTeacherControlRateHz = 500;
+constexpr uint32_t kTeacherControlRateHz = generated_teacher_lqr::kControlRateHz;
+constexpr float kRadiansToDegrees = 180.0f / PI;
+constexpr float kTeacherMaxCommandStepRateStepsPerSecond =
+    generated_teacher_lqr::kMaxCommandStepRateStepsPerSecond;
+constexpr float kTeacherMaxAccelerationStepsPerSecondSquared =
+    generated_teacher_lqr::kMaxAccelerationStepsPerSecondSquared;
+constexpr float kTeacherMaxVelocityDeltaPerCycleStepsPerSecond =
+    generated_teacher_lqr::kMaxVelocityDeltaPerSampleStepsPerSecond;
+constexpr float kTeacherEnableAngleThresholdRad = generated_teacher_lqr::kEnableAngleThresholdRad;
+constexpr float kTeacherEnableAngleRateThresholdRadPerSec =
+    generated_teacher_lqr::kEnableAngleRateThresholdRadPerSec;
+constexpr float kTeacherDisableAngleThresholdRad = generated_teacher_lqr::kDisableAngleThresholdRad;
+constexpr float kTeacherDisableAngleRateThresholdRadPerSec =
+    generated_teacher_lqr::kDisableAngleRateThresholdRadPerSec;
+constexpr float kTeacherSettledAngleThresholdRad = kTeacherEnableAngleThresholdRad;
+constexpr float kTeacherFallingAngleRateThresholdRadPerSec = 1.0f * PI / 180.0f;
+constexpr uint8_t kTeacherFallingPersistenceSamples =
+    static_cast<uint8_t>((kTeacherControlRateHz + 49U) / 50U);
 constexpr uint32_t kTelemetryRateHz = 200;
 constexpr int32_t kLimitPaddingSteps = 50;
 constexpr int32_t kCalibrationMaxTravelSteps = 20000;
@@ -64,6 +82,7 @@ constexpr TickType_t kMotionPollTicks = pdMS_TO_TICKS(2);
 constexpr TickType_t kSwitchDebounceTicks = pdMS_TO_TICKS(15);
 constexpr TickType_t kTeacherControlPeriodTicks = pdMS_TO_TICKS(1000 / kTeacherControlRateHz);
 constexpr TickType_t kTelemetryPeriodTicks = pdMS_TO_TICKS(1000 / kTelemetryRateHz);
+constexpr uint8_t kTeacherMaxConsecutiveSensorReadFailures = 3U;
 constexpr size_t kStateDimension = 4U;
 constexpr float kVelocityFilterAlpha = 0.2f;
 
@@ -71,7 +90,7 @@ constexpr size_t kCommandBufferSize = 64;
 constexpr UBaseType_t kMotionCommandQueueLength = 1;
 constexpr BaseType_t kMotionTaskCore = 1;
 constexpr BaseType_t kSerialTaskCore = 0;
-constexpr BaseType_t kTeacherTaskCore = 1;
+constexpr BaseType_t kTeacherTaskCore = 0;
 constexpr BaseType_t kTelemetryTaskCore = 0;
 constexpr uint32_t kTaskStackBytes = 6144;
 
@@ -93,6 +112,7 @@ constexpr int kEnableLevelMotorDisabled = 0;
 
 enum class MotionCommandKind : uint8_t {
     SetSpeed,
+    SetSpeedSilent,
     Stop,
     HomeAndCenter,
     MoveToCenter,
@@ -108,13 +128,18 @@ enum class ControllerMode : uint8_t {
     TeacherLqr,
 };
 
+enum class AngleReferenceMode : uint8_t {
+    UprightZero,
+    RestIsPlus180,
+};
+
 struct SensorSnapshot {
     uint64_t timestampUs = 0;
+    uint32_t sampleSequence = 0U;
+    uint32_t teacherLoopIteration = 0U;
     int32_t cartHomeSteps = 0;
     int32_t cartCenteredSteps = 0;
-    float cartHomeMm = 0.0f;
-    float cartCenteredMm = 0.0f;
-    float cartVelocityMmPerSec = 0.0f;
+    float cartVelocityStepsPerSec = 0.0f;
     uint16_t angleRawCounts = 0U;
     float angleDegrees = 0.0f;
     float angleRadians = 0.0f;
@@ -125,6 +150,7 @@ struct SensorSnapshot {
     bool angleZeroValid = false;
     bool axisHomed = false;
     ControllerMode controllerMode = ControllerMode::Manual;
+    AngleReferenceMode angleReferenceMode = AngleReferenceMode::UprightZero;
 };
 
 // Shared motion, calibration, and telemetry state accessed across tasks and the timer ISR.
@@ -163,12 +189,15 @@ volatile bool g_telemetryEnabled = false;
 volatile bool g_as5600AckSeen = false;
 volatile bool g_as5600RawReadOk = false;
 volatile ControllerMode g_controllerMode = ControllerMode::Manual;
+volatile AngleReferenceMode g_angleReferenceMode = AngleReferenceMode::UprightZero;
 volatile uint16_t g_lastAngleRawCounts = 0U;
 volatile int32_t g_lastContinuousAngleCounts = 0;
 volatile int32_t g_angleZeroContinuousCounts = 0;
-volatile float g_lastCartVelocityMmPerSec = 0.0f;
+volatile float g_lastCartVelocityStepsPerSec = 0.0f;
 volatile float g_lastAngleVelocityRadPerSec = 0.0f;
 volatile uint64_t g_lastSensorTimestampUs = 0U;
+volatile uint32_t g_sensorSampleSequence = 0U;
+volatile uint32_t g_teacherLoopIteration = 0U;
 volatile uint8_t g_lastAs5600I2cStatus = 0xFFU;
 SensorSnapshot g_latestSensorSnapshot = {};
 float g_teacherLqrGain[kStateDimension] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -195,14 +224,20 @@ int32_t abs_i32(int32_t value)
     return (value < 0) ? -value : value;
 }
 
+int32_t clamp_i32(int32_t value, int32_t lower, int32_t upper)
+{
+    if (value < lower) {
+        return lower;
+    }
+    if (value > upper) {
+        return upper;
+    }
+    return value;
+}
+
 double steps_to_mm(int32_t steps)
 {
     return static_cast<double>(steps) * static_cast<double>(kMillimetersPerStep);
-}
-
-double steps_to_meters(int32_t steps)
-{
-    return steps_to_mm(steps) / static_cast<double>(kMillimetersPerMeter);
 }
 
 int32_t wrap_angle_count_delta(int32_t deltaCounts)
@@ -231,6 +266,7 @@ uint32_t magnitude_from_signed_rate(long signedStepRate)
 }
 
 int32_t signed_rate_from_direction(bool clockwise, uint32_t magnitude);
+int32_t current_signed_step_rate();
 bool queue_motion_command(MotionCommandKind kind);
 bool sample_sensor_snapshot(bool forceRead);
 void set_signed_step_rate(int32_t requestedSignedStepRate, bool enforceSafety, bool emitSerial);
@@ -382,8 +418,13 @@ void reset_sensor_sample_state()
     portENTER_CRITICAL(&g_motionMux);
     g_sensorSampleValid = false;
     g_lastSensorTimestampUs = 0U;
-    g_lastCartVelocityMmPerSec = 0.0f;
+    g_sensorSampleSequence = 0U;
+    g_teacherLoopIteration = 0U;
+    g_lastCartVelocityStepsPerSec = 0.0f;
     g_lastAngleVelocityRadPerSec = 0.0f;
+    g_latestSensorSnapshot.timestampUs = 0U;
+    g_latestSensorSnapshot.sampleSequence = 0U;
+    g_latestSensorSnapshot.teacherLoopIteration = 0U;
     g_latestSensorSnapshot.sampleValid = false;
     portEXIT_CRITICAL(&g_motionMux);
 
@@ -418,6 +459,7 @@ void set_controller_mode(ControllerMode controllerMode)
 {
     portENTER_CRITICAL(&g_motionMux);
     g_controllerMode = controllerMode;
+    g_latestSensorSnapshot.controllerMode = controllerMode;
     portEXIT_CRITICAL(&g_motionMux);
 }
 
@@ -467,6 +509,18 @@ void copy_teacher_lqr_gains(float gainsOut[kStateDimension])
         gainsOut[index] = g_teacherLqrGain[index];
     }
     portEXIT_CRITICAL(&g_motionMux);
+}
+
+const char* angle_reference_mode_name(AngleReferenceMode angleReferenceMode)
+{
+    switch (angleReferenceMode) {
+        case AngleReferenceMode::UprightZero:
+            return "UPRIGHT0";
+        case AngleReferenceMode::RestIsPlus180:
+            return "REST180";
+    }
+
+    return "UNKNOWN";
 }
 
 void set_teacher_lqr_gains(float positionGain, float velocityGain, float angleGain, float angleRateGain)
@@ -562,6 +616,7 @@ void enforce_runtime_motion_safety()
     bool motionActive = false;
     bool axisHomed = false;
     bool directionClockwise = false;
+    ControllerMode controllerMode = ControllerMode::Manual;
     uint32_t activeStepRateHz = 0U;
     int32_t positionSteps = 0;
     int32_t axisCenterSteps = 0;
@@ -572,6 +627,7 @@ void enforce_runtime_motion_safety()
     motionActive = g_motionActive;
     axisHomed = g_axisHomed;
     directionClockwise = g_directionClockwise;
+    controllerMode = g_controllerMode;
     activeStepRateHz = g_activeStepRateHz;
     positionSteps = g_positionSteps;
     axisCenterSteps = g_axisCenterSteps;
@@ -597,32 +653,36 @@ void enforce_runtime_motion_safety()
     }
 
     set_signed_step_rate(0, false, true);
+    if (controllerMode == ControllerMode::TeacherLqr) {
+        set_controller_mode(ControllerMode::Manual);
+    }
     Serial.printf(
         "Hard limit stop: cart=%ld steps hard=[%ld,%ld]\n",
         static_cast<long>(currentCartSteps),
         static_cast<long>(hardLimitMinSteps),
         static_cast<long>(hardLimitMaxSteps));
+    if (controllerMode == ControllerMode::TeacherLqr) {
+        Serial.println("Teacher LQR disabled: motion safety stop");
+    }
 }
 
 bool as5600_read_raw_angle(uint16_t* rawAngleCounts)
 {
-    Wire.beginTransmission(kAs5600I2cAddress);
-    const uint8_t probeStatus = Wire.endTransmission(true);
-    if (probeStatus != 0U) {
-        set_as5600_diagnostics(false, false, probeStatus);
-        return false;
-    }
+    bool ackSeen = false;
+    uint8_t lastI2cStatus = 0xFFU;
 
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        const bool useRepeatedStart = attempt == 0;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const bool useRepeatedStart = attempt < 2;
 
         Wire.beginTransmission(kAs5600I2cAddress);
         Wire.write(kAs5600RawAngleHighRegister);
         const uint8_t txStatus = Wire.endTransmission(!useRepeatedStart);
+        lastI2cStatus = txStatus;
         if (txStatus != 0U) {
-            set_as5600_diagnostics(true, false, txStatus);
             continue;
         }
+
+        ackSeen = true;
 
         const uint8_t bytesRequested = 2;
         const size_t bytesRead = Wire.requestFrom(static_cast<uint8_t>(kAs5600I2cAddress), bytesRequested);
@@ -630,7 +690,7 @@ bool as5600_read_raw_angle(uint16_t* rawAngleCounts)
             while (Wire.available() > 0) {
                 (void)Wire.read();
             }
-            set_as5600_diagnostics(true, false, 0U);
+            lastI2cStatus = 0U;
             continue;
         }
 
@@ -641,6 +701,7 @@ bool as5600_read_raw_angle(uint16_t* rawAngleCounts)
         return true;
     }
 
+    set_as5600_diagnostics(ackSeen, false, lastI2cStatus);
     return false;
 }
 
@@ -698,35 +759,39 @@ bool sample_sensor_snapshot(bool forceRead = false)
     const uint64_t timestampUs = static_cast<uint64_t>(esp_timer_get_time());
     const int32_t cartHomeSteps = cart_position_steps();
     const int32_t cartCenteredSteps = cart_centered_position_steps();
-    const float cartHomeMm = static_cast<float>(steps_to_mm(cartHomeSteps));
-    const float cartCenteredMm = static_cast<float>(steps_to_mm(cartCenteredSteps));
 
     bool previousSampleValid = false;
     bool angleZeroValid = false;
     bool axisHomed = false;
+    AngleReferenceMode angleReferenceMode = AngleReferenceMode::UprightZero;
     int32_t angleZeroContinuousCounts = 0;
     int32_t previousContinuousAngleCounts = 0;
     uint16_t previousRawAngleCounts = 0U;
     uint64_t previousTimestampUs = 0U;
-    float previousCartVelocityMmPerSec = 0.0f;
+    float previousCartVelocityStepsPerSec = 0.0f;
     float previousAngleVelocityRadPerSec = 0.0f;
-    float previousCartCenteredMm = 0.0f;
+    int32_t previousCartCenteredSteps = 0;
     float previousAngleRadians = 0.0f;
     int32_t commandStepsPerSecond = 0;
+    uint32_t sampleSequence = 0U;
+    uint32_t teacherLoopIteration = 0U;
 
     portENTER_CRITICAL(&g_motionMux);
     previousSampleValid = g_sensorSampleValid;
     angleZeroValid = g_angleZeroValid;
     axisHomed = g_axisHomed;
+    angleReferenceMode = g_angleReferenceMode;
     angleZeroContinuousCounts = g_angleZeroContinuousCounts;
     previousContinuousAngleCounts = g_lastContinuousAngleCounts;
     previousRawAngleCounts = g_lastAngleRawCounts;
     previousTimestampUs = g_lastSensorTimestampUs;
-    previousCartVelocityMmPerSec = g_lastCartVelocityMmPerSec;
+    previousCartVelocityStepsPerSec = g_lastCartVelocityStepsPerSec;
     previousAngleVelocityRadPerSec = g_lastAngleVelocityRadPerSec;
-    previousCartCenteredMm = g_latestSensorSnapshot.cartCenteredMm;
+    previousCartCenteredSteps = g_latestSensorSnapshot.cartCenteredSteps;
     previousAngleRadians = g_latestSensorSnapshot.angleRadians;
     commandStepsPerSecond = g_commandedSignedStepRate;
+    sampleSequence = g_sensorSampleSequence + 1U;
+    teacherLoopIteration = g_teacherLoopIteration;
     portEXIT_CRITICAL(&g_motionMux);
 
     int32_t continuousAngleCounts = static_cast<int32_t>(rawAngleCounts);
@@ -742,13 +807,15 @@ bool sample_sensor_snapshot(bool forceRead = false)
                                  : 0.0f;
     const float relativeAngleDegrees = angleZeroValid ? (relativeAngleRadians * 180.0f / PI) : 0.0f;
 
-    float cartVelocityMmPerSec = 0.0f;
+    float cartVelocityStepsPerSec = 0.0f;
     float angleVelocityRadPerSec = 0.0f;
     if (previousSampleValid && (timestampUs > previousTimestampUs)) {
         const float dtSeconds = static_cast<float>(timestampUs - previousTimestampUs) * 1e-6f;
-        const float rawCartVelocityMmPerSec = (cartCenteredMm - previousCartCenteredMm) / dtSeconds;
-        cartVelocityMmPerSec = previousCartVelocityMmPerSec +
-                               (kVelocityFilterAlpha * (rawCartVelocityMmPerSec - previousCartVelocityMmPerSec));
+        const float rawCartVelocityStepsPerSec =
+            static_cast<float>(cartCenteredSteps - previousCartCenteredSteps) / dtSeconds;
+        cartVelocityStepsPerSec = previousCartVelocityStepsPerSec +
+                                  (kVelocityFilterAlpha *
+                                   (rawCartVelocityStepsPerSec - previousCartVelocityStepsPerSec));
 
         if (angleZeroValid) {
             const float rawAngleVelocityRadPerSec = (relativeAngleRadians - previousAngleRadians) / dtSeconds;
@@ -760,11 +827,11 @@ bool sample_sensor_snapshot(bool forceRead = false)
 
     SensorSnapshot snapshot = {};
     snapshot.timestampUs = timestampUs;
+    snapshot.sampleSequence = sampleSequence;
+    snapshot.teacherLoopIteration = teacherLoopIteration;
     snapshot.cartHomeSteps = cartHomeSteps;
     snapshot.cartCenteredSteps = cartCenteredSteps;
-    snapshot.cartHomeMm = cartHomeMm;
-    snapshot.cartCenteredMm = cartCenteredMm;
-    snapshot.cartVelocityMmPerSec = cartVelocityMmPerSec;
+    snapshot.cartVelocityStepsPerSec = cartVelocityStepsPerSec;
     snapshot.angleRawCounts = rawAngleCounts;
     snapshot.angleDegrees = relativeAngleDegrees;
     snapshot.angleRadians = relativeAngleRadians;
@@ -775,43 +842,57 @@ bool sample_sensor_snapshot(bool forceRead = false)
     snapshot.angleZeroValid = angleZeroValid;
     snapshot.axisHomed = axisHomed;
     snapshot.controllerMode = controllerMode;
+    snapshot.angleReferenceMode = angleReferenceMode;
 
     portENTER_CRITICAL(&g_motionMux);
     g_sensorOnline = true;
     g_sensorSampleValid = true;
     g_lastAngleRawCounts = rawAngleCounts;
     g_lastContinuousAngleCounts = continuousAngleCounts;
-    g_lastCartVelocityMmPerSec = cartVelocityMmPerSec;
+    g_lastCartVelocityStepsPerSec = cartVelocityStepsPerSec;
     g_lastAngleVelocityRadPerSec = angleVelocityRadPerSec;
     g_lastSensorTimestampUs = timestampUs;
+    g_sensorSampleSequence = sampleSequence;
     g_latestSensorSnapshot = snapshot;
     portEXIT_CRITICAL(&g_motionMux);
 
     return true;
 }
 
-bool capture_rest_angle_reference()
+bool capture_angle_reference(AngleReferenceMode angleReferenceMode)
 {
     if (!sample_sensor_snapshot(true)) {
-        Serial.println("Rest-angle capture unavailable: AS5600 not detected on I2C");
+        Serial.println("Angle-reference capture unavailable: AS5600 not detected on I2C");
         return false;
     }
 
     uint16_t rawAngleCounts = 0U;
     int32_t continuousAngleCounts = 0;
+    int32_t angleZeroContinuousCounts = 0;
 
     portENTER_CRITICAL(&g_motionMux);
     rawAngleCounts = g_lastAngleRawCounts;
     continuousAngleCounts = g_lastContinuousAngleCounts;
-    g_angleZeroContinuousCounts = continuousAngleCounts - kHalfTurnCounts;
+    angleZeroContinuousCounts = continuousAngleCounts;
+    if (angleReferenceMode == AngleReferenceMode::RestIsPlus180) {
+        angleZeroContinuousCounts -= kHalfTurnCounts;
+    }
+    g_angleZeroContinuousCounts = angleZeroContinuousCounts;
+    g_angleReferenceMode = angleReferenceMode;
     g_angleZeroValid = true;
     portEXIT_CRITICAL(&g_motionMux);
 
     reset_sensor_sample_state();
     (void)sample_sensor_snapshot(true);
-    Serial.printf(
-        "Rest angle captured: raw=%u. This hanging position is +180 deg; upright is 0 deg.\n",
-        static_cast<unsigned int>(rawAngleCounts));
+    if (angleReferenceMode == AngleReferenceMode::RestIsPlus180) {
+        Serial.printf(
+            "Rest angle captured: raw=%u. This position is +180 deg; upright is 0 deg.\n",
+            static_cast<unsigned int>(rawAngleCounts));
+    } else {
+        Serial.printf(
+            "Upright angle captured: raw=%u. This position is 0 deg; hanging rest is +180 deg.\n",
+            static_cast<unsigned int>(rawAngleCounts));
+    }
     return true;
 }
 
@@ -820,11 +901,68 @@ void print_teacher_gains()
     float gains[kStateDimension] = {};
     copy_teacher_lqr_gains(gains);
     Serial.printf(
-        "Teacher LQR gains [cart_m cart_mps angle_rad angle_rate_radps] -> steps/s: [%.6f %.6f %.6f %.6f]\n",
+        "Teacher LQR gains [cart_steps cart_steps_s angle_rad angle_rate_radps] -> steps/s: [%.6f %.6f %.6f %.6f]\n",
         gains[0],
         gains[1],
         gains[2],
         gains[3]);
+}
+
+bool teacher_state_within_gate(
+    const SensorSnapshot& snapshot,
+    float angleLimitRad,
+    float angleRateLimitRadPerSec)
+{
+    return (fabsf(snapshot.angleRadians) <= angleLimitRad) &&
+           (fabsf(snapshot.angleVelocityRadPerSec) <= angleRateLimitRadPerSec);
+}
+
+void print_teacher_gate_failure(
+    const char* prefix,
+    const SensorSnapshot& snapshot,
+    float angleLimitRad,
+    float angleRateLimitRadPerSec)
+{
+    Serial.printf(
+        "%s |angle|=%.2f/%.2f deg |angleVel|=%.2f/%.2f deg/s\n",
+        prefix,
+        fabsf(snapshot.angleRadians) * kRadiansToDegrees,
+        angleLimitRad * kRadiansToDegrees,
+        fabsf(snapshot.angleVelocityRadPerSec) * kRadiansToDegrees,
+        angleRateLimitRadPerSec * kRadiansToDegrees);
+}
+
+int32_t clamp_teacher_requested_step_rate(int32_t requestedSignedStepRate)
+{
+    const int32_t teacherMaxMagnitude = static_cast<int32_t>(lroundf(fminf(
+        static_cast<float>(kMaxStepRateHz),
+        kTeacherMaxCommandStepRateStepsPerSecond)));
+
+    if (teacherMaxMagnitude <= 0) {
+        return 0;
+    }
+
+    const int32_t limitedMagnitude = min(abs_i32(requestedSignedStepRate), teacherMaxMagnitude);
+    if (limitedMagnitude < static_cast<int32_t>(kMinStepRateHz)) {
+        return 0;
+    }
+
+    return (requestedSignedStepRate >= 0) ? limitedMagnitude : -limitedMagnitude;
+}
+
+int32_t limit_teacher_requested_step_rate(int32_t requestedSignedStepRate)
+{
+    const int32_t saturatedRequestedStepRate = clamp_teacher_requested_step_rate(requestedSignedStepRate);
+    const int32_t currentSignedStepRate = current_signed_step_rate();
+    const int32_t maxVelocityDeltaPerCycle = max(
+        1,
+        static_cast<int32_t>(lroundf(kTeacherMaxVelocityDeltaPerCycleStepsPerSecond)));
+    const int32_t delta = clamp_i32(
+        saturatedRequestedStepRate - currentSignedStepRate,
+        -maxVelocityDeltaPerCycle,
+        maxVelocityDeltaPerCycle);
+
+    return clamp_teacher_requested_step_rate(currentSignedStepRate + delta);
 }
 
 bool enable_teacher_mode()
@@ -847,7 +985,20 @@ bool enable_teacher_mode()
     }
 
     if (!angleZeroValid) {
-        Serial.println("Teacher mode unavailable: let the pole hang and run RESTANGLE first");
+        Serial.println("Teacher mode unavailable: capture ANGLEZERO (upright) or RESTANGLE first");
+        return false;
+    }
+
+    const SensorSnapshot snapshot = latest_sensor_snapshot();
+    if (!teacher_state_within_gate(
+            snapshot,
+            kTeacherEnableAngleThresholdRad,
+            kTeacherEnableAngleRateThresholdRadPerSec)) {
+        print_teacher_gate_failure(
+            "Teacher mode unavailable: move the pole closer to upright before enabling",
+            snapshot,
+            kTeacherEnableAngleThresholdRad,
+            kTeacherEnableAngleRateThresholdRadPerSec);
         return false;
     }
 
@@ -869,14 +1020,29 @@ void disable_teacher_mode(bool stopMotion)
     Serial.println("Teacher LQR disabled");
 }
 
-int32_t compute_teacher_command_steps_per_second(const SensorSnapshot& snapshot)
+bool teacher_state_is_falling_away_from_upright(const SensorSnapshot& snapshot)
 {
+    if (fabsf(snapshot.angleVelocityRadPerSec) < kTeacherFallingAngleRateThresholdRadPerSec) {
+        return false;
+    }
+    return (snapshot.angleRadians * snapshot.angleVelocityRadPerSec) > 0.0f;
+}
+
+int32_t compute_teacher_command_steps_per_second(
+    const SensorSnapshot& snapshot,
+    bool allowSettledRegionCorrection)
+{
+    if ((fabsf(snapshot.angleRadians) <= kTeacherSettledAngleThresholdRad) &&
+        !allowSettledRegionCorrection) {
+        return 0;
+    }
+
     float gains[kStateDimension] = {};
     copy_teacher_lqr_gains(gains);
 
     const float state[kStateDimension] = {
-        static_cast<float>(steps_to_meters(snapshot.cartCenteredSteps)),
-        snapshot.cartVelocityMmPerSec / kMillimetersPerMeter,
+        -static_cast<float>(snapshot.cartCenteredSteps),
+        -snapshot.cartVelocityStepsPerSec,
         snapshot.angleRadians,
         snapshot.angleVelocityRadPerSec,
     };
@@ -886,7 +1052,7 @@ int32_t compute_teacher_command_steps_per_second(const SensorSnapshot& snapshot)
         requestedStepsPerSecond -= gains[index] * state[index];
     }
 
-    return static_cast<int32_t>(lroundf(requestedStepsPerSecond));
+    return limit_teacher_requested_step_rate(static_cast<int32_t>(lroundf(requestedStepsPerSecond)));
 }
 
 // Low-level GPIO and timer helpers directly drive the TB6600 step and direction signals.
@@ -1021,11 +1187,12 @@ void print_help()
 {
     Serial.println("Commands:");
     Serial.println("  SENSOR");
-    Serial.println("  RESTANGLE");
-    Serial.println("  ANGLEZERO   (alias for RESTANGLE)");
-    Serial.println("  SETK <cart_m> <cart_mps> <angle_rad> <angle_rate_radps>");
+    Serial.println("  RESTANGLE   (current position becomes +180 deg)");
+    Serial.println("  ANGLEZERO [UPRIGHT|REST]   (default UPRIGHT, current position becomes 0 or +180 deg)");
+    Serial.println("  ZEROANGLE [UPRIGHT|REST]   (alias for ANGLEZERO)");
+    Serial.println("  SETK <cart_steps> <cart_steps_s> <angle_rad> <angle_rate_radps>");
     Serial.println("  GAINS");
-    Serial.println("  TEACHER ON");
+    Serial.println("  TEACHER ON    (requires near-upright angle and angular-rate gate)");
     Serial.println("  TEACHER OFF");
     Serial.println("  LOG ON");
     Serial.println("  LOG OFF");
@@ -1097,9 +1264,8 @@ void print_status()
     const int32_t currentCartSteps = currentHomeSteps - axisCenterSteps;
 
     Serial.printf(
-        "cart=%ld steps (%.2f mm) home=%ld steps raw=%ld active=%s ena=%s enaPin=%s dir=%s dir26=%s dir33=%s commanded=%+ld steps/s current=%+ld steps/s homeStop=%s homed=%s homing=%s travel=%ld steps centerHome=%ld steps limits=[%ld,%ld]\n",
+        "cart=%ld steps home=%ld steps raw=%ld active=%s ena=%s enaPin=%s dir=%s dir26=%s dir33=%s commanded=%+ld steps/s current=%+ld steps/s homeStop=%s homed=%s homing=%s travel=%ld steps centerHome=%ld steps limits=[%ld,%ld]\n",
         static_cast<long>(currentCartSteps),
-        steps_to_mm(currentCartSteps),
         static_cast<long>(currentHomeSteps),
         static_cast<long>(positionSteps),
         active ? "yes" : "no",
@@ -1119,7 +1285,7 @@ void print_status()
         static_cast<long>(hard_limit_max_steps()));
 
     Serial.printf(
-        "mode=%s telemetry=%s sensor=%s ack=%s rawRead=%s i2c=%u sample=%s uprightRef=%s cartCenter=%ld steps (%.2f mm) angle=%.4f rad (%.2f deg) cartVel=%.2f mm/s angleVel=%.4f rad/s sampleTs=%llu K=[%.6f %.6f %.6f %.6f]\n",
+        "mode=%s telemetry=%s sensor=%s ack=%s rawRead=%s i2c=%u sample=%s angleRef=%s(%s) cartCenter=%ld steps angle=%.4f rad (%.2f deg) cartVel=%.2f steps/s angleVel=%.4f rad/s sampleTs=%llu K=[%.6f %.6f %.6f %.6f]\n",
         controller_mode_name(controllerMode),
         telemetryEnabled ? "ON" : "OFF",
         sensorSnapshot.sensorOnline ? "online" : "offline",
@@ -1128,11 +1294,11 @@ void print_status()
         static_cast<unsigned int>(lastAs5600I2cStatus),
         sensorSnapshot.sampleValid ? "yes" : "no",
         sensorSnapshot.angleZeroValid ? "yes" : "no",
+        sensorSnapshot.angleZeroValid ? angle_reference_mode_name(sensorSnapshot.angleReferenceMode) : "UNSET",
         static_cast<long>(sensorSnapshot.cartCenteredSteps),
-        sensorSnapshot.cartCenteredMm,
         sensorSnapshot.angleRadians,
         sensorSnapshot.angleDegrees,
-        sensorSnapshot.cartVelocityMmPerSec,
+        sensorSnapshot.cartVelocityStepsPerSec,
         sensorSnapshot.angleVelocityRadPerSec,
         static_cast<unsigned long long>(sensorSnapshot.timestampUs),
         gains[0],
@@ -1224,6 +1390,7 @@ void stop_motion()
     timerAlarmDisable(g_stepTimer);
 
     portENTER_CRITICAL(&g_motionMux);
+    g_commandedSignedStepRate = 0;
     g_motionActive = false;
     g_activeStepRateHz = 0U;
     g_phaseTicksRemaining = 0U;
@@ -1248,20 +1415,32 @@ void pause_motion_pulses()
     signal_inactive(kStepPin);
 }
 
-bool queue_signed_step_rate(int32_t requestedSignedStepRate)
+bool queue_signed_step_rate_internal(int32_t requestedSignedStepRate, bool forceManualMode)
 {
     if (g_motionCommandQueue == nullptr) {
         return false;
     }
 
     request_motion_sequence_abort();
-    set_controller_mode(ControllerMode::Manual);
+    if (forceManualMode) {
+        set_controller_mode(ControllerMode::Manual);
+    }
 
     MotionCommand motionCommand = {
-        MotionCommandKind::SetSpeed,
+        forceManualMode ? MotionCommandKind::SetSpeed : MotionCommandKind::SetSpeedSilent,
         requestedSignedStepRate,
     };
     return xQueueOverwrite(g_motionCommandQueue, &motionCommand) == pdPASS;
+}
+
+bool queue_signed_step_rate(int32_t requestedSignedStepRate)
+{
+    return queue_signed_step_rate_internal(requestedSignedStepRate, true);
+}
+
+bool queue_teacher_signed_step_rate(int32_t requestedSignedStepRate)
+{
+    return queue_signed_step_rate_internal(requestedSignedStepRate, false);
 }
 
 bool queue_motion_command(MotionCommandKind kind)
@@ -1408,9 +1587,8 @@ bool run_centering_sequence()
 
     clear_motion_sequence_abort();
     Serial.printf(
-        "Centering to %ld steps (%.2f mm)\n",
-        static_cast<long>(axisCenterSteps),
-        steps_to_mm(axisCenterSteps));
+        "Centering to %ld steps\n",
+        static_cast<long>(axisCenterSteps));
     return move_to_cart_position_steps(axisCenterSteps, kMaxStepRateHz);
 }
 
@@ -1474,9 +1652,8 @@ bool run_home_and_center_sequence()
     portEXIT_CRITICAL(&g_motionMux);
 
     Serial.printf(
-        "Home found: travel=%ld steps (%.2f mm), center=%ld steps, soft=[%ld,%ld]\n",
+        "Home found: travel=%ld steps, center=%ld steps, soft=[%ld,%ld]\n",
         static_cast<long>(travelSteps),
-        steps_to_mm(travelSteps),
         static_cast<long>(axisCenterSteps),
         static_cast<long>(softLimitMinSteps),
         static_cast<long>(softLimitMaxSteps));
@@ -1520,9 +1697,16 @@ void handle_command(char* rawCommand)
         return;
     }
 
-    if ((strcasecmp(command, "RESTANGLE") == 0) || (strcasecmp(command, "ANGLEZERO") == 0) ||
-        (strcasecmp(command, "ZEROANGLE") == 0)) {
-        (void)capture_rest_angle_reference();
+    if ((strcasecmp(command, "RESTANGLE") == 0) || (strcasecmp(command, "ANGLEZERO REST") == 0) ||
+        (strcasecmp(command, "ZEROANGLE REST") == 0)) {
+        (void)capture_angle_reference(AngleReferenceMode::RestIsPlus180);
+        return;
+    }
+
+    if ((strcasecmp(command, "ANGLEZERO") == 0) || (strcasecmp(command, "ZEROANGLE") == 0) ||
+        (strcasecmp(command, "ANGLEZERO UPRIGHT") == 0) ||
+        (strcasecmp(command, "ZEROANGLE UPRIGHT") == 0)) {
+        (void)capture_angle_reference(AngleReferenceMode::UprightZero);
         return;
     }
 
@@ -1642,6 +1826,10 @@ void motion_control_task(void* /*parameter*/)
                     clear_motion_sequence_abort();
                     set_signed_step_rate(motionCommand.signedStepRate, true);
                     break;
+                case MotionCommandKind::SetSpeedSilent:
+                    clear_motion_sequence_abort();
+                    set_signed_step_rate(motionCommand.signedStepRate, true, false);
+                    break;
                 case MotionCommandKind::Stop:
                     clear_motion_sequence_abort();
                     set_signed_step_rate(0, false);
@@ -1662,41 +1850,105 @@ void motion_control_task(void* /*parameter*/)
 void teacher_control_task(void* /*parameter*/)
 {
     TickType_t lastWakeTime = xTaskGetTickCount();
+    uint8_t consecutiveSensorReadFailures = 0U;
+    uint8_t consecutiveFallingAwaySamples = 0U;
 
     for (;;) {
+        portENTER_CRITICAL(&g_motionMux);
+        ++g_teacherLoopIteration;
+        portEXIT_CRITICAL(&g_motionMux);
+
         const ControllerMode controllerMode = current_controller_mode();
         const bool teacherActive = controllerMode == ControllerMode::TeacherLqr;
         const bool telemetryActive = telemetry_enabled();
 
         if (!(teacherActive || telemetryActive)) {
+            consecutiveSensorReadFailures = 0U;
+            consecutiveFallingAwaySamples = 0U;
             vTaskDelay(pdMS_TO_TICKS(20));
             lastWakeTime = xTaskGetTickCount();
             continue;
         }
 
         const bool sampleValid = sample_sensor_snapshot(true);
-        if (teacherActive) {
+        if (!teacherActive) {
+            consecutiveSensorReadFailures = 0U;
+            consecutiveFallingAwaySamples = 0U;
+        } else {
+            if (current_controller_mode() != ControllerMode::TeacherLqr) {
+                consecutiveSensorReadFailures = 0U;
+                consecutiveFallingAwaySamples = 0U;
+                vTaskDelayUntil(&lastWakeTime, kTeacherControlPeriodTicks);
+                continue;
+            }
+
             if (!sampleValid) {
-                set_controller_mode(ControllerMode::Manual);
-                set_signed_step_rate(0, false, true);
-                Serial.println("Teacher LQR disabled: AS5600 read failed");
+                if (consecutiveSensorReadFailures < kTeacherMaxConsecutiveSensorReadFailures) {
+                    ++consecutiveSensorReadFailures;
+                }
+
+                if (consecutiveSensorReadFailures >= kTeacherMaxConsecutiveSensorReadFailures) {
+                    set_controller_mode(ControllerMode::Manual);
+                    set_signed_step_rate(0, false, true);
+                    Serial.printf(
+                        "Teacher LQR disabled: AS5600 read failed %u consecutive times\n",
+                        static_cast<unsigned int>(consecutiveSensorReadFailures));
+                    consecutiveSensorReadFailures = 0U;
+                    consecutiveFallingAwaySamples = 0U;
+                }
             } else {
+                consecutiveSensorReadFailures = 0U;
                 const SensorSnapshot snapshot = latest_sensor_snapshot();
                 if (!snapshot.axisHomed) {
+                    consecutiveFallingAwaySamples = 0U;
                     set_controller_mode(ControllerMode::Manual);
                     set_signed_step_rate(0, false, true);
                     Serial.println("Teacher LQR disabled: cart is not homed");
                 } else if (!snapshot.angleZeroValid) {
+                    consecutiveFallingAwaySamples = 0U;
                     set_controller_mode(ControllerMode::Manual);
                     set_signed_step_rate(0, false, true);
                     Serial.println("Teacher LQR disabled: angle reference is not zeroed");
+                } else if (!teacher_state_within_gate(
+                               snapshot,
+                               kTeacherDisableAngleThresholdRad,
+                               kTeacherDisableAngleRateThresholdRadPerSec)) {
+                    consecutiveFallingAwaySamples = 0U;
+                    set_controller_mode(ControllerMode::Manual);
+                    set_signed_step_rate(0, false, true);
+                    print_teacher_gate_failure(
+                        "Teacher LQR disabled: state left the capture region",
+                        snapshot,
+                        kTeacherDisableAngleThresholdRad,
+                        kTeacherDisableAngleRateThresholdRadPerSec);
                 } else {
-                    const int32_t requestedStepRate = compute_teacher_command_steps_per_second(snapshot);
-                    set_signed_step_rate(requestedStepRate, true, false);
+                    const bool insideSettledRegion =
+                        fabsf(snapshot.angleRadians) <= kTeacherSettledAngleThresholdRad;
+                    const bool fallingAway = teacher_state_is_falling_away_from_upright(snapshot);
+
+                    if (!insideSettledRegion) {
+                        consecutiveFallingAwaySamples = kTeacherFallingPersistenceSamples;
+                    } else if (fallingAway) {
+                        if (consecutiveFallingAwaySamples < kTeacherFallingPersistenceSamples) {
+                            ++consecutiveFallingAwaySamples;
+                        }
+                    } else {
+                        consecutiveFallingAwaySamples = 0U;
+                    }
+
+                    const bool allowSettledRegionCorrection =
+                        consecutiveFallingAwaySamples >= kTeacherFallingPersistenceSamples;
+                    const int32_t requestedStepRate =
+                        compute_teacher_command_steps_per_second(snapshot, allowSettledRegionCorrection);
+                    (void)queue_teacher_signed_step_rate(requestedStepRate);
                 }
             }
         }
 
+        const TickType_t now = xTaskGetTickCount();
+        if ((now - lastWakeTime) > kTeacherControlPeriodTicks) {
+            lastWakeTime = now;
+        }
         vTaskDelayUntil(&lastWakeTime, kTeacherControlPeriodTicks);
     }
 }
@@ -1704,31 +1956,34 @@ void teacher_control_task(void* /*parameter*/)
 void telemetry_stream_task(void* /*parameter*/)
 {
     TickType_t lastWakeTime = xTaskGetTickCount();
+    uint64_t lastPublishedTimestampUs = 0U;
 
     for (;;) {
         if (!telemetry_enabled()) {
             g_telemetryHeaderPrinted = false;
+            lastPublishedTimestampUs = 0U;
             vTaskDelay(pdMS_TO_TICKS(20));
             lastWakeTime = xTaskGetTickCount();
             continue;
         }
 
         const SensorSnapshot snapshot = latest_sensor_snapshot();
-        if (snapshot.sampleValid && snapshot.sensorOnline) {
+        if (snapshot.sampleValid && snapshot.sensorOnline &&
+            (snapshot.timestampUs != lastPublishedTimestampUs)) {
             if (!g_telemetryHeaderPrinted) {
                 Serial.println(
-                    "DATA_HEADER,timestamp_us,cart_home_steps,cart_center_steps,cart_home_mm,cart_center_mm,cart_vel_mm_s,angle_raw_counts,angle_deg,angle_rad,angle_vel_rad_s,command_steps_s,mode,homed,angle_zeroed");
+                    "DATA_HEADER,timestamp_us,sample_seq,teacher_iter,cart_home_steps,cart_center_steps,cart_vel_steps_s,angle_raw_counts,angle_deg,angle_rad,angle_vel_rad_s,command_steps_s,mode,homed,angle_zeroed");
                 g_telemetryHeaderPrinted = true;
             }
 
             Serial.printf(
-                "DATA,%llu,%ld,%ld,%.3f,%.3f,%.3f,%u,%.3f,%.6f,%.6f,%ld,%s,%s,%s\n",
+                "DATA,%llu,%lu,%lu,%ld,%ld,%.3f,%u,%.3f,%.6f,%.6f,%ld,%s,%s,%s\n",
                 static_cast<unsigned long long>(snapshot.timestampUs),
+                static_cast<unsigned long>(snapshot.sampleSequence),
+                static_cast<unsigned long>(snapshot.teacherLoopIteration),
                 static_cast<long>(snapshot.cartHomeSteps),
                 static_cast<long>(snapshot.cartCenteredSteps),
-                snapshot.cartHomeMm,
-                snapshot.cartCenteredMm,
-                snapshot.cartVelocityMmPerSec,
+                snapshot.cartVelocityStepsPerSec,
                 static_cast<unsigned int>(snapshot.angleRawCounts),
                 snapshot.angleDegrees,
                 snapshot.angleRadians,
@@ -1737,8 +1992,13 @@ void telemetry_stream_task(void* /*parameter*/)
                 controller_mode_name(snapshot.controllerMode),
                 snapshot.axisHomed ? "yes" : "no",
                 snapshot.angleZeroValid ? "yes" : "no");
+            lastPublishedTimestampUs = snapshot.timestampUs;
         }
 
+        const TickType_t now = xTaskGetTickCount();
+        if ((now - lastWakeTime) > kTelemetryPeriodTicks) {
+            lastWakeTime = now;
+        }
         vTaskDelayUntil(&lastWakeTime, kTelemetryPeriodTicks);
     }
 }
@@ -1763,6 +2023,11 @@ void setup()
     angle_sensor_init();
     clear_axis_calibration();
     reset_sensor_sample_state();
+    set_teacher_lqr_gains(
+        generated_teacher_lqr::kGains[0],
+        generated_teacher_lqr::kGains[1],
+        generated_teacher_lqr::kGains[2],
+        generated_teacher_lqr::kGains[3]);
     g_motionCommandQueue = xQueueCreate(kMotionCommandQueueLength, sizeof(MotionCommand));
 
     if (g_motionCommandQueue == nullptr) {
@@ -1783,6 +2048,25 @@ void setup()
         "reset=%s (%d) type HELP for commands\n",
         reset_reason_name(resetReason),
         static_cast<int>(resetReason));
+    Serial.printf(
+        "generated_teacher_lqr control=%luHz delay=%.3fms\n",
+        static_cast<unsigned long>(generated_teacher_lqr::kControlRateHz),
+        generated_teacher_lqr::kValidationCommandDelaySeconds * 1000.0f);
+    Serial.printf(
+        "teacher gate enable=%.1fdeg %.1fdeg/s disable=%.1fdeg %.1fdeg/s maxCmd=%.0f maxAccel=%.0f rateStep=%.1f tau=%.3fs\n",
+        generated_teacher_lqr::kEnableAngleThresholdRad * kRadiansToDegrees,
+        generated_teacher_lqr::kEnableAngleRateThresholdRadPerSec * kRadiansToDegrees,
+        generated_teacher_lqr::kDisableAngleThresholdRad * kRadiansToDegrees,
+        generated_teacher_lqr::kDisableAngleRateThresholdRadPerSec * kRadiansToDegrees,
+        generated_teacher_lqr::kMaxCommandStepRateStepsPerSecond,
+        kTeacherMaxAccelerationStepsPerSecondSquared,
+        kTeacherMaxVelocityDeltaPerCycleStepsPerSecond,
+        generated_teacher_lqr::kActuatorTimeConstantSeconds);
+    Serial.printf(
+        "teacher sign +theta->%s +thetaDot->%s\n",
+        generated_teacher_lqr::kPositiveThetaCommandsPositiveStepRate ? "+u" : "-u",
+        generated_teacher_lqr::kPositiveThetaRateCommandsPositiveStepRate ? "+u" : "-u");
+    print_teacher_gains();
 
     (void)xTaskCreatePinnedToCore(
         motion_control_task,
@@ -1805,7 +2089,7 @@ void setup()
         "teacher_control",
         kTaskStackBytes,
         nullptr,
-        1,
+        2,
         &g_teacherTaskHandle,
         kTeacherTaskCore);
     (void)xTaskCreatePinnedToCore(
