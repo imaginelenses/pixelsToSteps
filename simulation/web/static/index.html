@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CartPole Image Control</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">Simulation Control</p>
+        <h1>CartPole Image-Based Control</h1>
+        <p class="lede">Live Gym RGB render, binary observation, image-based controller state, and direct restart/reset controls from one page.</p>
+      </div>
+      <div class="button-row">
+        <button id="startButton" type="button">Start</button>
+        <button id="restartButton" type="button">Restart</button>
+        <button id="stopButton" type="button">Stop</button>
+        <button id="stepButton" type="button">Step Once</button>
+      </div>
+    </section>
+
+    <section class="layout">
+      <article class="panel stream-panel">
+        <div class="panel-header">
+          <h2>Gym RGB Render</h2>
+          <span id="runStatus" class="badge">Idle</span>
+        </div>
+        <img id="rgbStream" alt="Live Gym render" src="/stream/rgb">
+      </article>
+
+      <article class="panel stream-panel">
+        <div class="panel-header">
+          <h2>Binary Observation</h2>
+          <span class="badge muted">Pixels</span>
+        </div>
+        <img id="binaryStream" alt="Live binary image" src="/stream/binary">
+      </article>
+    </section>
+
+    <section class="layout second-row">
+      <article class="panel controls-panel">
+        <div class="panel-header">
+          <h2>Reset and Initial State</h2>
+        </div>
+        <form id="resetForm">
+          <label>Cart Position (m)
+            <input name="cart_position_m" type="number" step="0.01" value="0">
+          </label>
+          <label>Cart Velocity (m/s)
+            <input name="cart_velocity_m_s" type="number" step="0.01" value="0">
+          </label>
+          <label>Pole Angle (deg)
+            <input name="pole_angle_deg" type="number" step="0.1" value="12">
+          </label>
+          <label>Pole Rate (deg/s)
+            <input name="pole_angle_rate_deg_s" type="number" step="0.1" value="0">
+          </label>
+          <label>Observer JSON
+            <select id="observerSelect" name="observer_json_path"></select>
+          </label>
+          <label class="checkbox-row">
+            <input id="useImageController" name="use_image_controller" type="checkbox" checked>
+            Use image-based control
+          </label>
+          <label class="checkbox-row">
+            <input id="autoStart" name="auto_start" type="checkbox">
+            Auto start after reset
+          </label>
+          <button type="submit">Reset Simulation</button>
+        </form>
+      </article>
+
+      <article class="panel controls-panel">
+        <div class="panel-header">
+          <h2>Runtime Configuration</h2>
+        </div>
+        <form id="configForm">
+          <label>Sample Time (s)
+            <input name="sample_time_s" type="number" step="0.001" value="0.0166667">
+          </label>
+          <label>Frame Width (px)
+            <input name="frame_width_px" type="number" step="1" value="160">
+          </label>
+          <label>Frame Height (px)
+            <input name="frame_height_px" type="number" step="1" value="125">
+          </label>
+          <label>True Pole Mass Scale
+            <input name="true_masspole_scale" type="number" step="0.01" value="1.1">
+          </label>
+          <label>True Half-Length Scale
+            <input name="true_half_pole_length_scale" type="number" step="0.01" value="0.9">
+          </label>
+          <label>Process Noise Std (N)
+            <input name="process_noise_std_n" type="number" step="0.001" value="0">
+          </label>
+          <button type="submit">Apply Configuration</button>
+        </form>
+      </article>
+    </section>
+
+    <section class="layout third-row">
+      <article class="panel telemetry-panel">
+        <div class="panel-header">
+          <h2>Ground Truth State</h2>
+        </div>
+        <dl id="groundTruthState" class="metrics"></dl>
+      </article>
+
+      <article class="panel telemetry-panel">
+        <div class="panel-header">
+          <h2>Estimated State</h2>
+        </div>
+        <dl id="estimatedState" class="metrics"></dl>
+      </article>
+
+      <article class="panel telemetry-panel">
+        <div class="panel-header">
+          <h2>Control and Observer</h2>
+        </div>
+        <dl id="controlState" class="metrics"></dl>
+      </article>
+    </section>
+  </main>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

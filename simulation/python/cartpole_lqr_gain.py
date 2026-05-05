@@ -43,19 +43,19 @@ class PhysicalCartPoleParams:
     sample_time_s: float = 1.0 / 250.0
     gravity_m_s2: float = 9.81
     track_total_length_m: float = 0.30
-    max_step_rate_steps_s: float = 12000.0
+    max_step_rate_steps_s: float = 20000.0
     actuator_time_constant_s: float = 0.03
-    max_cart_accel_steps_s2: float = 150000.0
+    max_cart_accel_steps_s2: float = 300000.0
     meters_per_step: float = 0.0000125
     pole_length_m: float = 0.13
     pole_rod_mass_kg: float = 0.0095
     pole_tip_mass_kg: float = 0.005
     control_penalty_r: float = 1e-6
-    command_delay_s: float = 0.0
+    command_delay_s: float = 0.01
     teacher_enable_angle_rad: float = math.radians(3.0)
     teacher_enable_angle_rate_rad_s: float = math.radians(45.0)
-    teacher_disable_angle_rad: float = math.radians(6.0)
-    teacher_disable_angle_rate_rad_s: float = math.radians(90.0)
+    teacher_disable_angle_rad: float = math.radians(10.0)
+    teacher_disable_angle_rate_rad_s: float = math.radians(150.0)
 
     @property
     def track_half_length_m(self) -> float:
@@ -75,7 +75,7 @@ class PhysicalCartPoleParams:
 
 
 def generated_header_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "include" / "generated_teacher_lqr_gains.h"
+    return Path(__file__).resolve().parents[2] / "hardware" / "firmware" / "include" / "generated_teacher_lqr_gains.h"
 
 
 def generated_json_path() -> Path:
@@ -90,6 +90,140 @@ def cpp_bool(value: bool) -> str:
     return "true" if value else "false"
 
 
+def validated_steps_per_unit(steps_per_unit: float) -> float:
+    validated_value = float(steps_per_unit)
+    if validated_value <= 0.0:
+        raise ValueError(f"steps_per_unit must be positive, got {steps_per_unit!r}")
+    return validated_value
+
+
+def state_steps_to_scaled_steps(state: np.ndarray, steps_per_unit: float) -> np.ndarray:
+    validated_value = validated_steps_per_unit(steps_per_unit)
+    state_array = np.asarray(state, dtype=np.float64)
+    scale = np.array([1.0 / validated_value, 1.0 / validated_value, 1.0, 1.0], dtype=np.float64)
+    return state_array * scale
+
+
+def control_steps_to_scaled_steps(command_steps_s: float, steps_per_unit: float) -> float:
+    validated_value = validated_steps_per_unit(steps_per_unit)
+    return float(command_steps_s) / validated_value
+
+
+def gain_steps_to_scaled_steps(gain: np.ndarray, steps_per_unit: float) -> np.ndarray:
+    validated_value = validated_steps_per_unit(steps_per_unit)
+    gain_array = np.asarray(gain, dtype=np.float64)
+    gain_scale = np.array([1.0, 1.0, 1.0 / validated_value, 1.0 / validated_value], dtype=np.float64)
+    return gain_array * gain_scale
+
+
+def discrete_system_steps_to_scaled_steps(
+    a_discrete: np.ndarray,
+    b_discrete: np.ndarray,
+    steps_per_unit: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    validated_value = validated_steps_per_unit(steps_per_unit)
+    state_scale = np.diag([1.0 / validated_value, 1.0 / validated_value, 1.0, 1.0]).astype(np.float64)
+    inverse_state_scale = np.diag([validated_value, validated_value, 1.0, 1.0]).astype(np.float64)
+    a_scaled = state_scale @ np.asarray(a_discrete, dtype=np.float64) @ inverse_state_scale
+    b_scaled = (state_scale @ np.asarray(b_discrete, dtype=np.float64)) * validated_value
+    return a_scaled, b_scaled
+
+
+def q_matrix_steps_to_scaled_steps(q_matrix: np.ndarray, steps_per_unit: float) -> np.ndarray:
+    validated_value = validated_steps_per_unit(steps_per_unit)
+    inverse_state_scale = np.diag([validated_value, validated_value, 1.0, 1.0]).astype(np.float64)
+    return inverse_state_scale.T @ np.asarray(q_matrix, dtype=np.float64) @ inverse_state_scale
+
+
+def r_matrix_steps_to_scaled_steps(r_matrix: np.ndarray, steps_per_unit: float) -> np.ndarray:
+    validated_value = validated_steps_per_unit(steps_per_unit)
+    return np.asarray(r_matrix, dtype=np.float64) * (validated_value**2)
+
+
+def sign_report_steps_to_scaled_steps(
+    sign_report: dict[str, float | bool],
+    steps_per_unit: float,
+) -> dict[str, float | bool]:
+    return {
+        "positive_theta_commands_positive_scaled_step_rate": bool(
+            sign_report["positive_theta_commands_positive_step_rate"]
+        ),
+        "positive_theta_rate_commands_positive_scaled_step_rate": bool(
+            sign_report["positive_theta_rate_commands_positive_step_rate"]
+        ),
+        "theta_only_command_scaled_steps_s_per_rad": control_steps_to_scaled_steps(
+            float(sign_report["theta_only_command_steps_s_per_rad"]),
+            steps_per_unit,
+        ),
+        "theta_rate_only_command_scaled_steps_s_per_rad_s": control_steps_to_scaled_steps(
+            float(sign_report["theta_rate_only_command_steps_s_per_rad_s"]),
+            steps_per_unit,
+        ),
+    }
+
+
+def build_observation_matrix() -> np.ndarray:
+    return np.array(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def choose_kalman_noise_matrices(
+    sigma_v_steps_s: float,
+    sigma_omega_rad_s: float,
+    sigma_position_steps: float,
+    sigma_angle_rad: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    if sigma_v_steps_s <= 0.0:
+        raise ValueError("sigma_v_steps_s must be positive.")
+    if sigma_omega_rad_s <= 0.0:
+        raise ValueError("sigma_omega_rad_s must be positive.")
+    if sigma_position_steps <= 0.0:
+        raise ValueError("sigma_position_steps must be positive.")
+    if sigma_angle_rad <= 0.0:
+        raise ValueError("sigma_angle_rad must be positive.")
+
+    q_process = np.diag(
+        [
+            0.0,
+            float(sigma_v_steps_s**2),
+            0.0,
+            float(sigma_omega_rad_s**2),
+        ]
+    )
+    r_observation = np.diag(
+        [
+            float(sigma_position_steps**2),
+            float(sigma_angle_rad**2),
+        ]
+    )
+    return q_process, r_observation
+
+
+def solve_steady_state_kalman_gain(
+    a_discrete: np.ndarray,
+    observation_matrix: np.ndarray,
+    q_process: np.ndarray,
+    r_observation: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    estimator_covariance = solve_discrete_are(
+        a_discrete.T,
+        observation_matrix.T,
+        q_process,
+        r_observation,
+    )
+    innovation_covariance = (
+        observation_matrix @ estimator_covariance @ observation_matrix.T
+    ) + r_observation
+    kalman_gain = estimator_covariance @ observation_matrix.T @ np.linalg.inv(innovation_covariance)
+    estimator_poles = np.linalg.eigvals(a_discrete - kalman_gain @ observation_matrix)
+    return kalman_gain, estimator_covariance, estimator_poles
+
+
 def build_teacher_lqr_payload(
     params: PhysicalCartPoleParams,
     q_matrix: np.ndarray,
@@ -97,28 +231,76 @@ def build_teacher_lqr_payload(
     gain: np.ndarray,
     closed_loop_poles: np.ndarray,
     sign_report: dict[str, float | bool],
+    observation_matrix: np.ndarray | None = None,
+    q_process: np.ndarray | None = None,
+    r_observation: np.ndarray | None = None,
+    kalman_gain: np.ndarray | None = None,
+    estimator_poles: np.ndarray | None = None,
     a_discrete: np.ndarray | None = None,
     b_discrete: np.ndarray | None = None,
+    unit_system: str = "steps",
+    steps_per_unit: float = 1.0,
 ) -> dict[str, object]:
-    q_diag = np.diag(q_matrix)
-    pole_magnitudes = np.abs(closed_loop_poles)
-    payload: dict[str, object] = {
-        "state_order": [
-            "cart_position_steps",
-            "cart_velocity_steps_s",
+    if unit_system not in {"steps", "scaled_steps"}:
+        raise ValueError(f"Unsupported unit system: {unit_system}")
+
+    q_payload = np.asarray(q_matrix, dtype=np.float64)
+    r_payload = np.asarray(r_matrix, dtype=np.float64)
+    gain_payload = np.asarray(gain, dtype=np.float64)
+    observation_payload = np.asarray(observation_matrix, dtype=np.float64) if observation_matrix is not None else None
+    q_process_payload = np.asarray(q_process, dtype=np.float64) if q_process is not None else None
+    r_observation_payload = np.asarray(r_observation, dtype=np.float64) if r_observation is not None else None
+    kalman_gain_payload = np.asarray(kalman_gain, dtype=np.float64) if kalman_gain is not None else None
+    estimator_poles_payload = np.asarray(estimator_poles, dtype=np.complex128) if estimator_poles is not None else None
+    a_payload = np.asarray(a_discrete, dtype=np.float64) if a_discrete is not None else None
+    b_payload = np.asarray(b_discrete, dtype=np.float64) if b_discrete is not None else None
+    sign_report_payload = sign_report
+    state_order = [
+        "cart_position_steps",
+        "cart_velocity_steps_s",
+        "pole_angle_rad",
+        "pole_angle_rate_rad_s",
+    ]
+    input_units = "steps_per_second"
+    max_velocity_delta_key = "max_velocity_delta_steps_s"
+    max_velocity_delta_value = float(params.max_velocity_delta_steps_s)
+
+    if unit_system == "scaled_steps":
+        validated_value = validated_steps_per_unit(steps_per_unit)
+        q_payload = q_matrix_steps_to_scaled_steps(q_matrix, validated_value)
+        r_payload = r_matrix_steps_to_scaled_steps(r_matrix, validated_value)
+        gain_payload = gain_steps_to_scaled_steps(gain, validated_value)
+        if a_payload is not None and b_payload is not None:
+            a_payload, b_payload = discrete_system_steps_to_scaled_steps(a_payload, b_payload, validated_value)
+        sign_report_payload = sign_report_steps_to_scaled_steps(sign_report, validated_value)
+        state_order = [
+            "cart_position_scaled_steps",
+            "cart_velocity_scaled_steps_s",
             "pole_angle_rad",
             "pole_angle_rate_rad_s",
+        ]
+        input_units = "scaled_steps_per_second"
+        max_velocity_delta_key = "max_velocity_delta_scaled_steps_s"
+        max_velocity_delta_value = control_steps_to_scaled_steps(params.max_velocity_delta_steps_s, validated_value)
+
+    q_diag = np.diag(q_payload)
+    pole_magnitudes = np.abs(closed_loop_poles)
+    payload: dict[str, object] = {
+        "unit_system": unit_system,
+        "steps_per_unit": float(validated_steps_per_unit(steps_per_unit)),
+        "state_order": [
+            *state_order,
         ],
-        "input_units": "steps_per_second",
+        "input_units": input_units,
         "control_law": "u = -Kx",
         "control_rate_hz": float(1.0 / params.sample_time_s),
         "sample_time_s": float(params.sample_time_s),
         "params": asdict(params),
         "actuator_alpha": float(params.actuator_alpha),
-        "max_velocity_delta_steps_s": float(params.max_velocity_delta_steps_s),
+        max_velocity_delta_key: max_velocity_delta_value,
         "Q_diag": q_diag.astype(float).tolist(),
-        "R": float(r_matrix[0, 0]),
-        "K": gain.reshape(-1).astype(float).tolist(),
+        "R": float(r_payload[0, 0]),
+        "K": gain_payload.reshape(-1).astype(float).tolist(),
         "closed_loop_pole_magnitudes": pole_magnitudes.astype(float).tolist(),
         "closed_loop_poles": [
             {
@@ -130,13 +312,32 @@ def build_teacher_lqr_payload(
         ],
         "sign_report": {
             key: (bool(value) if isinstance(value, (bool, np.bool_)) else float(value))
-            for key, value in sign_report.items()
+            for key, value in sign_report_payload.items()
         },
     }
-    if a_discrete is not None:
-        payload["A"] = a_discrete.astype(float).tolist()
-    if b_discrete is not None:
-        payload["B"] = b_discrete.astype(float).tolist()
+    if a_payload is not None:
+        payload["A"] = a_payload.astype(float).tolist()
+    if b_payload is not None:
+        payload["B"] = b_payload.astype(float).tolist()
+    if observation_payload is not None:
+        payload["C"] = observation_payload.astype(float).tolist()
+    if q_process_payload is not None:
+        payload["Q_process_diag"] = np.diag(q_process_payload).astype(float).tolist()
+    if r_observation_payload is not None:
+        payload["R_observation_diag"] = np.diag(r_observation_payload).astype(float).tolist()
+    if kalman_gain_payload is not None:
+        payload["Kf"] = kalman_gain_payload.astype(float).tolist()
+    if estimator_poles_payload is not None:
+        estimator_pole_magnitudes = np.abs(estimator_poles_payload)
+        payload["estimator_pole_magnitudes"] = estimator_pole_magnitudes.astype(float).tolist()
+        payload["estimator_poles"] = [
+            {
+                "real": float(np.real(pole)),
+                "imag": float(np.imag(pole)),
+                "magnitude": float(abs(pole)),
+            }
+            for pole in estimator_poles_payload
+        ]
     return payload
 
 
@@ -147,9 +348,16 @@ def write_generated_teacher_lqr_json(
     gain: np.ndarray,
     closed_loop_poles: np.ndarray,
     sign_report: dict[str, float | bool],
+    observation_matrix: np.ndarray | None = None,
+    q_process: np.ndarray | None = None,
+    r_observation: np.ndarray | None = None,
+    kalman_gain: np.ndarray | None = None,
+    estimator_poles: np.ndarray | None = None,
     a_discrete: np.ndarray | None = None,
     b_discrete: np.ndarray | None = None,
     output_path: Path | None = None,
+    unit_system: str = "steps",
+    steps_per_unit: float = 1.0,
 ) -> Path:
     json_path = output_path or generated_json_path()
     json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -160,8 +368,15 @@ def write_generated_teacher_lqr_json(
         gain,
         closed_loop_poles,
         sign_report,
+        observation_matrix=observation_matrix,
+        q_process=q_process,
+        r_observation=r_observation,
+        kalman_gain=kalman_gain,
+        estimator_poles=estimator_poles,
         a_discrete=a_discrete,
         b_discrete=b_discrete,
+        unit_system=unit_system,
+        steps_per_unit=steps_per_unit,
     )
     json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return json_path
@@ -174,12 +389,24 @@ def write_generated_teacher_lqr_header(
     gain: np.ndarray,
     closed_loop_poles: np.ndarray,
     sign_report: dict[str, float | bool],
+    derived: dict[str, float],
+    q_process: np.ndarray,
+    r_observation: np.ndarray,
+    kalman_gain: np.ndarray,
+    estimator_poles: np.ndarray,
 ) -> Path:
     header_path = generated_header_path()
     header_path.parent.mkdir(parents=True, exist_ok=True)
     q_diag = np.diag(q_matrix)
+    q_process_diag = np.diag(q_process)
+    r_observation_diag = np.diag(r_observation)
     pole_magnitudes = np.abs(closed_loop_poles)
+    estimator_pole_magnitudes = np.abs(estimator_poles)
     control_rate_hz = int(round(1.0 / params.sample_time_s))
+    kalman_gain_rows = ", ".join(
+        "{" + ", ".join(cpp_float(float(value)) for value in row) + "}"
+        for row in kalman_gain
+    )
     header_text = f"""#pragma once
 #include <stdint.h>
 
@@ -204,6 +431,9 @@ def write_generated_teacher_lqr_header(
 // Teacher disable gate: |theta| < {math.degrees(params.teacher_disable_angle_rad):.3f} deg and |theta_dot| < {math.degrees(params.teacher_disable_angle_rate_rad_s):.3f} deg/s
 // Q diag: [{q_diag[0]:.9e}, {q_diag[1]:.9e}, {q_diag[2]:.9e}, {q_diag[3]:.9e}]
 // R: {r_matrix[0, 0]:.9e}
+// KF Q_proc diag: [{q_process_diag[0]:.9e}, {q_process_diag[1]:.9e}, {q_process_diag[2]:.9e}, {q_process_diag[3]:.9e}]
+// KF R_obs diag: [{r_observation_diag[0]:.9e}, {r_observation_diag[1]:.9e}]
+// KF estimator pole magnitudes: [{estimator_pole_magnitudes[0]:.9f}, {estimator_pole_magnitudes[1]:.9f}, {estimator_pole_magnitudes[2]:.9f}, {estimator_pole_magnitudes[3]:.9f}]
 // Closed-loop pole magnitudes: [{pole_magnitudes[0]:.9f}, {pole_magnitudes[1]:.9f}, {pole_magnitudes[2]:.9f}, {pole_magnitudes[3]:.9f}]
 // Gains: [{gain[0, 0]:.9f}, {gain[0, 1]:.9f}, {gain[0, 2]:.9f}, {gain[0, 3]:.9f}]
 // Sign check: +theta -> +u is {sign_report['positive_theta_commands_positive_step_rate']}, +theta_dot -> +u is {sign_report['positive_theta_rate_commands_positive_step_rate']}
@@ -221,6 +451,12 @@ constexpr float kTrackTotalLengthMeters = {cpp_float(params.track_total_length_m
 constexpr float kPoleLengthMeters = {cpp_float(params.pole_length_m)};
 constexpr float kPoleRodMassKg = {cpp_float(params.pole_rod_mass_kg)};
 constexpr float kPoleTipMassKg = {cpp_float(params.pole_tip_mass_kg)};
+constexpr float kPoleRodCenterOfMassMeters = {cpp_float(params.pole_length_m / 2.0)};
+constexpr float kPoleRodInertiaKgMetersSquared = {cpp_float(params.pole_rod_mass_kg * (params.pole_length_m**2) / 3.0)};
+constexpr float kPoleCenterOfMassMeters = {cpp_float(derived['center_of_mass_m'])};
+constexpr float kPolePivotInertiaKgMetersSquared = {cpp_float(derived['pivot_inertia_kg_m2'])};
+constexpr float kAngleGainRadPerSecSquared = {cpp_float(derived['angle_gain'])};
+constexpr float kAccelerationCoupling = {cpp_float(derived['accel_coupling'])};
 constexpr float kMetersPerStep = {cpp_float(params.meters_per_step)};
 constexpr float kEnableAngleThresholdRad = {cpp_float(params.teacher_enable_angle_rad)};
 constexpr float kEnableAngleRateThresholdRadPerSec = {cpp_float(params.teacher_enable_angle_rate_rad_s)};
@@ -228,6 +464,10 @@ constexpr float kDisableAngleThresholdRad = {cpp_float(params.teacher_disable_an
 constexpr float kDisableAngleRateThresholdRadPerSec = {cpp_float(params.teacher_disable_angle_rate_rad_s)};
 constexpr float kQDiag[4] = {{{cpp_float(float(q_diag[0]))}, {cpp_float(float(q_diag[1]))}, {cpp_float(float(q_diag[2]))}, {cpp_float(float(q_diag[3]))}}};
 constexpr float kR = {cpp_float(float(r_matrix[0, 0]))};
+constexpr float kKalmanProcessNoiseDiag[4] = {{{cpp_float(float(q_process_diag[0]))}, {cpp_float(float(q_process_diag[1]))}, {cpp_float(float(q_process_diag[2]))}, {cpp_float(float(q_process_diag[3]))}}};
+constexpr float kKalmanObservationNoiseDiag[2] = {{{cpp_float(float(r_observation_diag[0]))}, {cpp_float(float(r_observation_diag[1]))}}};
+constexpr float kKalmanGain[4][2] = {{{kalman_gain_rows}}};
+constexpr float kKalmanEstimatorPoleMagnitudes[4] = {{{cpp_float(float(estimator_pole_magnitudes[0]))}, {cpp_float(float(estimator_pole_magnitudes[1]))}, {cpp_float(float(estimator_pole_magnitudes[2]))}, {cpp_float(float(estimator_pole_magnitudes[3]))}}};
 constexpr float kClosedLoopPoleMagnitudes[4] = {{{cpp_float(float(pole_magnitudes[0]))}, {cpp_float(float(pole_magnitudes[1]))}, {cpp_float(float(pole_magnitudes[2]))}, {cpp_float(float(pole_magnitudes[3]))}}};
 constexpr float kGains[4] = {{{cpp_float(float(gain[0, 0]))}, {cpp_float(float(gain[0, 1]))}, {cpp_float(float(gain[0, 2]))}, {cpp_float(float(gain[0, 3]))}}};
 constexpr bool kPositiveThetaCommandsPositiveStepRate = {cpp_bool(bool(sign_report['positive_theta_commands_positive_step_rate']))};
@@ -667,7 +907,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-step-rate-steps-s",
         type=float,
-        default=12000.0,
+        default=20000.0,
         help="Maximum teacher command magnitude in steps/s used for design and saturation.",
     )
     parser.add_argument(
@@ -679,7 +919,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-cart-accel-steps-s2",
         type=float,
-        default=150000.0,
+        default=300000.0,
         help="Validation-only cart acceleration magnitude limit in steps/s^2.",
     )
     parser.add_argument(
@@ -691,7 +931,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--command-delay-s",
         type=float,
-        default=0.0,
+        default=0.01,
         help="Pure command-to-motion delay used only in simulation validation.",
     )
     parser.add_argument(
@@ -709,14 +949,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disable-angle-threshold-deg",
         type=float,
-        default=6.0,
+        default=10.0,
         help="Teacher dropout gate for |theta| in degrees.",
     )
     parser.add_argument(
         "--disable-angle-rate-threshold-deg-s",
         type=float,
-        default=90.0,
+        default=150.0,
         help="Teacher dropout gate for |theta_dot| in deg/s.",
+    )
+    parser.add_argument(
+        "--kf-sigma-v-steps-s",
+        type=float,
+        default=50.0,
+        help="Steady-state KF process noise sigma for cart velocity in steps/s.",
+    )
+    parser.add_argument(
+        "--kf-sigma-omega-rad-s",
+        type=float,
+        default=0.5,
+        help="Steady-state KF process noise sigma for pole angle rate in rad/s.",
+    )
+    parser.add_argument(
+        "--kf-sigma-position-steps",
+        type=float,
+        default=2.0,
+        help="Steady-state KF observation noise sigma for cart position in steps.",
+    )
+    parser.add_argument(
+        "--kf-sigma-angle-rad",
+        type=float,
+        default=0.002,
+        help="Steady-state KF observation noise sigma for pole angle in radians.",
     )
     return parser
 
@@ -763,7 +1027,20 @@ def main() -> None:
 
     a_discrete, b_discrete, derived = linearize_physical_cartpole(params)
     q_matrix, r_matrix = choose_cost_matrices(params)
+    observation_matrix = build_observation_matrix()
+    q_process, r_observation = choose_kalman_noise_matrices(
+        args.kf_sigma_v_steps_s,
+        args.kf_sigma_omega_rad_s,
+        args.kf_sigma_position_steps,
+        args.kf_sigma_angle_rad,
+    )
     gain, _riccati_solution, closed_loop_poles = solve_discrete_lqr(a_discrete, b_discrete, q_matrix, r_matrix)
+    kalman_gain, _estimator_covariance, estimator_poles = solve_steady_state_kalman_gain(
+        a_discrete,
+        observation_matrix,
+        q_process,
+        r_observation,
+    )
     sign_report = verify_sign_conventions(gain)
     survived_steps, final_state, last_target_command_steps_s, states, rollout_stats = rollout_episode(
         gain,
@@ -793,6 +1070,11 @@ def main() -> None:
         gain,
         closed_loop_poles,
         sign_report,
+        derived,
+        q_process,
+        r_observation,
+        kalman_gain,
+        estimator_poles,
     )
     output_json_path = write_generated_teacher_lqr_json(
         params,
@@ -801,6 +1083,11 @@ def main() -> None:
         gain,
         closed_loop_poles,
         sign_report,
+        observation_matrix=observation_matrix,
+        q_process=q_process,
+        r_observation=r_observation,
+        kalman_gain=kalman_gain,
+        estimator_poles=estimator_poles,
         a_discrete=a_discrete,
         b_discrete=b_discrete,
     )
@@ -820,9 +1107,14 @@ def main() -> None:
     print(f"Q diag      : {np.array2string(np.diag(q_matrix), precision=8, suppress_small=False)}")
     print(f"R           : {r_matrix[0, 0]:.5e}")
     print(f"K           : {gain[0]}")
+    print(f"C           :\n{np.array2string(observation_matrix, precision=8, suppress_small=False)}")
+    print(f"Q_proc diag : {np.array2string(np.diag(q_process), precision=8, suppress_small=False)}")
+    print(f"R_obs diag  : {np.array2string(np.diag(r_observation), precision=8, suppress_small=False)}")
+    print(f"Kf          :\n{np.array2string(kalman_gain, precision=8, suppress_small=False)}")
     print(f"SETK        : {' '.join(f'{value:.6f}' for value in gain[0])}")
     print(f"Gain file   : {output_header_path}")
     print(f"Gain json   : {output_json_path}")
+    print(f"|kf poles|  : {np.abs(estimator_poles)}")
     print(f"|poles|     : {np.abs(closed_loop_poles)}")
     print(f"Track       : {params.track_total_length_m:.3f} m total ({params.track_half_length_steps:.0f} steps each side)")
     print(f"Pole length : {params.pole_length_m:.3f} m")

@@ -4,7 +4,7 @@ High-FPS video capture utility for the Arducam VGA global shutter USB camera.
 
 Usage:
 	python camera.py
-	python camera.py --source 1 --fps 800 --duration 10 --output captures/run.avi
+	python camera.py --source 1 --fps 800 --duration 10 --output ../captures/run.avi
 	python camera.py --camera-fourcc NONE --video-fourcc MJPG --frames 5000
 
 The script requests a small frame size and uses grab()/retrieve() so the capture
@@ -206,7 +206,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--output",
 		default=None,
-		help="Video output path. Defaults to captures/capture_YYYYmmdd_HHMMSS.avi.",
+		help="Video output path. Defaults to hardware/captures/capture_YYYYmmdd_HHMMSS.avi.",
 	)
 	parser.add_argument("--duration", type=float, default=0.0, help="Capture duration in seconds. 0 means until Ctrl+C.")
 	parser.add_argument("--frames", type=int, default=0, help="Stop after this many captured frames. 0 means unlimited.")
@@ -247,7 +247,7 @@ def resolve_output_path(explicit_path: Optional[str]) -> Path:
 		return Path(explicit_path).expanduser().resolve()
 
 	timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-	return (Path.cwd() / "captures" / f"capture_{timestamp}.avi").resolve()
+	return (Path(__file__).resolve().parents[1] / "captures" / f"capture_{timestamp}.avi").resolve()
 
 
 def fourcc_to_string(raw_value: float) -> str:

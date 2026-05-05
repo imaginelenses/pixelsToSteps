@@ -52,7 +52,7 @@ GOAL_ANGLE_RAD = math.radians(1.0)
 GOAL_ANGLE_RATE_RAD_S = math.radians(10.0)
 GOAL_HOLD_TIME_S = 0.25
 DEFAULT_PREVIEW_RATE_HZ = 25.0
-DEFAULT_CAPTURE_ROOT = Path(__file__).resolve().parent / "captures"
+DEFAULT_CAPTURE_ROOT = Path(__file__).resolve().parents[1] / "captures"
 
 
 def default_video_output_path() -> Path:
@@ -78,40 +78,86 @@ def capture_controller_path(frames_dir: Path) -> Path:
 
 def extract_binary_pole_frame(
     rgb_frame: np.ndarray,
-    frame_width_px: int,
-    frame_height_px: int,
-    pole_rgb: tuple[int, int, int] = (202, 152, 101),
-    color_tolerance: int = 90,
+    frame_width_px: int | None,
+    frame_height_px: int | None,
+    background_white_threshold: int = 245,
     dilation_kernel_size: int = 5,
     top_padding_px: int = 2,
     track_black_fraction: float = 0.9,
 ) -> np.ndarray:
-    rgb_int = rgb_frame.astype(np.int16)
-    pole_color = np.array(pole_rgb, dtype=np.int16)
-    color_distance_sq = np.sum((rgb_int - pole_color) ** 2, axis=2)
-    pole_mask = np.where(color_distance_sq <= (color_tolerance**2), 255, 0).astype(np.uint8)
+    foreground_mask = np.where(np.any(rgb_frame < background_white_threshold, axis=2), 255, 0).astype(np.uint8)
 
     black_row_counts = np.count_nonzero(np.all(rgb_frame == 0, axis=2), axis=1)
     track_row_candidates = np.flatnonzero(black_row_counts >= track_black_fraction * rgb_frame.shape[1])
-    crop_bottom = int(track_row_candidates[-1] + 1) if track_row_candidates.size else rgb_frame.shape[0]
+    crop_bottom = int(track_row_candidates[0]) if track_row_candidates.size else rgb_frame.shape[0]
 
-    pole_rows = np.flatnonzero(np.any(pole_mask > 0, axis=1))
-    crop_top = max(0, int(pole_rows[0]) - top_padding_px) if pole_rows.size else 0
+    foreground_rows = np.flatnonzero(np.any(foreground_mask > 0, axis=1))
+    crop_top = max(0, int(foreground_rows[0]) - top_padding_px) if foreground_rows.size else 0
     if crop_bottom <= crop_top:
         crop_top = 0
-        crop_bottom = max(1, crop_bottom)
+        crop_bottom = rgb_frame.shape[0]
 
-    pole_mask = pole_mask[crop_top:crop_bottom, :]
-    pole_mask = cv2.resize(pole_mask, (frame_width_px, frame_height_px), interpolation=cv2.INTER_NEAREST)
+    foreground_mask = foreground_mask[crop_top:crop_bottom, :]
+    if frame_width_px is not None and frame_height_px is not None:
+        foreground_mask = cv2.resize(foreground_mask, (frame_width_px, frame_height_px), interpolation=cv2.INTER_NEAREST)
     if dilation_kernel_size > 1:
         dilation_kernel = np.ones((dilation_kernel_size, dilation_kernel_size), dtype=np.uint8)
-        pole_mask = cv2.dilate(pole_mask, dilation_kernel, iterations=1)
-    return pole_mask
+        foreground_mask = cv2.dilate(foreground_mask, dilation_kernel, iterations=1)
+    return foreground_mask
+
+
+def pad_binary_frame_to_shape(
+    binary_frame: np.ndarray,
+    target_width_px: int,
+    target_height_px: int,
+) -> np.ndarray:
+    frame_height_px, frame_width_px = binary_frame.shape
+    if frame_height_px > target_height_px or frame_width_px > target_width_px:
+        raise ValueError(
+            "Binary frame is larger than the target observer geometry. "
+            f"Got {frame_height_px}x{frame_width_px}, target {target_height_px}x{target_width_px}."
+        )
+    pad_top = max(0, target_height_px - frame_height_px)
+    pad_bottom = 0
+    pad_left = max(0, (target_width_px - frame_width_px) // 2)
+    pad_right = max(0, target_width_px - frame_width_px - pad_left)
+    return cv2.copyMakeBorder(
+        binary_frame,
+        pad_top,
+        pad_bottom,
+        pad_left,
+        pad_right,
+        borderType=cv2.BORDER_CONSTANT,
+        value=0,
+    )
 
 
 def write_binary_frame(frame_path: Path, binary_frame: np.ndarray) -> None:
     if not cv2.imwrite(str(frame_path), binary_frame):
         raise RuntimeError(f"Failed to write frame PNG: {frame_path}")
+
+
+# CartPole-v1 rendering constants (screen_width=600, x_threshold=2.4 m).
+_CARTPOLE_RENDER_SCALE_PX_PER_M: float = 125.0  # 600 / (2 * 2.4)
+_CARTPOLE_RENDER_CENTER_COL_PX: float = 300.0   # 600 / 2
+# How many rows from the bottom of the binary frame to search for the cart body.
+_CART_CENTROID_BOTTOM_ROWS: int = 20
+
+
+def estimate_cart_position_from_binary_frame(binary_frame: np.ndarray) -> float | None:
+    """Return cart position in metres estimated from the geometric centroid of white
+    pixels in the bottom rows of a binary frame.
+
+    Returns None if no foreground pixels are found (safe to skip blending).
+    The frame width must equal the original CartPole render width (600 px) – i.e.
+    no side-cropping or rescaling is applied before this call.
+    """
+    bottom = binary_frame[-_CART_CENTROID_BOTTOM_ROWS:, :]
+    cols = np.flatnonzero(np.any(bottom > 128, axis=0))
+    if cols.size == 0:
+        return None
+    mean_col = float(np.mean(cols))
+    return (mean_col - _CARTPOLE_RENDER_CENTER_COL_PX) / _CARTPOLE_RENDER_SCALE_PX_PER_M
 
 
 def pace_realtime_loop(next_deadline_s: float) -> float:
@@ -175,10 +221,22 @@ def load_observer_policy(observer_json_path: Path) -> dict[str, object]:
     if theta_pixel_bias is not None:
         theta_pixel_bias = float(theta_pixel_bias)
     theta_pixel_blend_weight = float(theta_pixel_blend_weight)
+    theta_dot_blend_weight = float(payload.get("theta_dot_blend_weight", 0.0))
     if not 0.0 <= theta_pixel_blend_weight <= 1.0:
         raise ValueError(
             "theta_pixel_blend_weight must lie in [0, 1]. "
             f"Got {theta_pixel_blend_weight!r}."
+        )
+    if not 0.0 <= theta_dot_blend_weight <= 1.0:
+        raise ValueError(
+            "theta_dot_blend_weight must lie in [0, 1]. "
+            f"Got {theta_dot_blend_weight!r}."
+        )
+    cart_pixel_blend_weight = float(payload.get("cart_pixel_blend_weight", 0.0))
+    if not 0.0 <= cart_pixel_blend_weight <= 1.0:
+        raise ValueError(
+            "cart_pixel_blend_weight must lie in [0, 1]. "
+            f"Got {cart_pixel_blend_weight!r}."
         )
     nonzero_measurement_coefficients = int(np.count_nonzero(np.abs(l_gain) > 1e-12))
     nonzero_theta_pixel_coefficients = 0
@@ -200,6 +258,8 @@ def load_observer_policy(observer_json_path: Path) -> dict[str, object]:
         "theta_pixel_coefficients": theta_pixel_coefficients,
         "theta_pixel_bias": theta_pixel_bias,
         "theta_pixel_blend_weight": theta_pixel_blend_weight,
+        "theta_dot_blend_weight": theta_dot_blend_weight,
+        "cart_pixel_blend_weight": cart_pixel_blend_weight,
         "nonzero_theta_pixel_coefficients": nonzero_theta_pixel_coefficients,
     }
 
@@ -350,6 +410,8 @@ def rollout_with_capture(
         observer_theta_pixel_coefficients = None
         observer_theta_pixel_bias = None
         observer_theta_pixel_blend_weight = 0.0
+        observer_theta_dot_blend_weight = 0.0
+        observer_cart_pixel_blend_weight = 0.0
         estimated_state_m = None
         if observer_policy is not None:
             observer_a = np.asarray(observer_policy["A_L"], dtype=np.float64)
@@ -359,8 +421,9 @@ def rollout_with_capture(
             observer_theta_pixel_coefficients = observer_policy.get("theta_pixel_coefficients")
             observer_theta_pixel_bias = observer_policy.get("theta_pixel_bias")
             observer_theta_pixel_blend_weight = float(observer_policy.get("theta_pixel_blend_weight", 0.0))
+            observer_theta_dot_blend_weight = float(observer_policy.get("theta_dot_blend_weight", 0.0))
+            observer_cart_pixel_blend_weight = float(observer_policy.get("cart_pixel_blend_weight", 0.0))
             estimated_state_m = initial_state_m.copy()
-
         state_m = initial_state_m.copy()
         states = [state_m.copy()]
         trace_rows: list[dict[str, float | int | str]] = []
@@ -374,6 +437,8 @@ def rollout_with_capture(
         force_clip_count = 0
         capture_end_reason = "horizon"
         goal_reached_step = None
+        output_frame_width_px = None
+        output_frame_height_px = None
         required_consecutive_goal_steps = max(1, int(math.ceil(GOAL_HOLD_TIME_S / true_params.sample_time_s)))
         consecutive_goal_steps = 0
 
@@ -413,9 +478,12 @@ def rollout_with_capture(
                 raise RuntimeError("Gym did not return a frame for rgb_array rendering.")
             binary_frame = extract_binary_pole_frame(
                 np.asarray(rendered, dtype=np.uint8),
-                frame_width_px,
-                frame_height_px,
+                None,
+                None,
             )
+            if observer_policy is not None:
+                binary_frame = pad_binary_frame_to_shape(binary_frame, frame_width_px, frame_height_px)
+            output_frame_height_px, output_frame_width_px = binary_frame.shape
             frame_path = frames_dir / f"frame_{step_index:06d}.png"
             write_binary_frame(frame_path, binary_frame)
             logged_state_m = state_m + observation_noise_rng.normal(0.0, observation_noise_std)
@@ -446,6 +514,7 @@ def rollout_with_capture(
 
             if estimated_state_m is not None:
                 measurement_vector = binary_frame.astype(np.float64).reshape(-1) / 255.0
+                previous_estimated_state_m = estimated_state_m.copy()
                 predicted_state_m = (
                     (observer_a @ estimated_state_m)
                     + (observer_b[:, 0] * float(step_stats["commanded_control_force_n"]))
@@ -461,8 +530,24 @@ def rollout_with_capture(
                         (1.0 - observer_theta_pixel_blend_weight) * predicted_state_m[2]
                         + observer_theta_pixel_blend_weight * theta_pixel
                     )
+                    if observer_theta_dot_blend_weight > 0.0:
+                        theta_dot_corrected = (
+                            predicted_state_m[2] - previous_estimated_state_m[2]
+                        ) / true_params.sample_time_s
+                        predicted_state_m[3] = (
+                            (1.0 - observer_theta_dot_blend_weight) * predicted_state_m[3]
+                            + observer_theta_dot_blend_weight * theta_dot_corrected
+                        )
                     theta_pixel_deg_text = f"{math.degrees(theta_pixel):+.3f} deg"
-                estimated_state_m = predicted_state_m
+                    # --- Cart position blend from pixel geometry ---
+                    if observer_cart_pixel_blend_weight > 0.0:
+                        cart_pos_pixel = estimate_cart_position_from_binary_frame(binary_frame)
+                        if cart_pos_pixel is not None:
+                            predicted_state_m[0] = (
+                                (1.0 - observer_cart_pixel_blend_weight) * predicted_state_m[0]
+                                + observer_cart_pixel_blend_weight * cart_pos_pixel
+                            )
+                    estimated_state_m = predicted_state_m
                 if step_index < 10:
                     print(
                         f"Step {step_index:3d} | "
@@ -514,6 +599,8 @@ def rollout_with_capture(
             "capture_wall_clock_duration_s": capture_wall_clock_duration_s,
             "capture_end_reason": capture_end_reason,
             "goal_reached_step": goal_reached_step,
+            "output_frame_width_px": output_frame_width_px,
+            "output_frame_height_px": output_frame_height_px,
             "rollout_stats": {
                 "force_clip_count": float(force_clip_count),
                 "peak_requested_force_n": peak_requested_force_n,
@@ -602,7 +689,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--video-output",
         type=Path,
         default=default_video_output_path(),
-        help="Lossless output video path. Defaults to python/captures/cartpole_nominal_TIMESTAMP.mkv.",
+        help="Lossless output video path. Defaults to simulation/captures/cartpole_nominal_TIMESTAMP.mkv.",
     )
     parser.add_argument(
         "--frame-png-dir",
@@ -822,6 +909,8 @@ def main() -> None:
     frame_png_dir = args.frame_png_dir or default_frame_directory(args.video_output)
     render_every = effective_render_every(args.control_rate_hz, args.render_every)
     rollout_model = "gym_cartpole_nominal"
+    rollout_frame_width_px = args.frame_width_px if observer_policy is None else int(observer_policy["frame_width_px"])
+    rollout_frame_height_px = args.frame_height_px if observer_policy is None else int(observer_policy["frame_height_px"])
     rollout = rollout_with_capture(
         controller_gain,
         observer_policy,
@@ -832,8 +921,8 @@ def main() -> None:
         process_noise_rng,
         observation_noise_std,
         observation_noise_rng,
-        args.frame_width_px,
-        args.frame_height_px,
+        rollout_frame_width_px,
+        rollout_frame_height_px,
         frame_png_dir,
         args.render,
         render_every,
@@ -870,8 +959,8 @@ def main() -> None:
         nominal_params,
         true_params,
         logged_initial_state,
-        args.frame_width_px,
-        args.frame_height_px,
+        int(rollout["output_frame_width_px"]),
+        int(rollout["output_frame_height_px"]),
         initial_angle_deg,
         args.steps,
         frames_captured,
@@ -917,7 +1006,9 @@ def main() -> None:
     else:
         print("Video path  : skipped (--skip-video-assembly)")
     print(f"Frames      : {frames_captured}")
-    print(f"Frame size  : {args.frame_height_px}x{args.frame_width_px}")
+    print(
+        f"Frame size  : {int(rollout['output_frame_height_px'])}x{int(rollout['output_frame_width_px'])}"
+    )
     print(f"Frame rate  : {args.control_rate_hz:.3f} fps")
     print(f"Sample time : {nominal_params.sample_time_s:.6f} s")
     print(f"Max force   : {nominal_params.max_force_n:.3f} N")
