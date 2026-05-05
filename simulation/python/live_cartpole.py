@@ -366,14 +366,8 @@ class LiveCartPoleSimulator:
             )
             self._last_binary_frame = binary_frame
         rgb_bgr = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
-        display_rgb = cv2.resize(rgb_bgr, (self.config.frame_width_px, self.config.frame_height_px), interpolation=cv2.INTER_AREA)
-        display_binary = cv2.resize(
-            binary_frame,
-            (self.config.frame_width_px, self.config.frame_height_px),
-            interpolation=cv2.INTER_NEAREST,
-        )
-        rgb_ok, rgb_encoded = cv2.imencode(".jpg", display_rgb, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-        binary_ok, binary_encoded = cv2.imencode(".jpg", display_binary, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        rgb_ok, rgb_encoded = cv2.imencode(".jpg", rgb_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        binary_ok, binary_encoded = cv2.imencode(".jpg", binary_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         if not rgb_ok or not binary_ok:
             raise RuntimeError("Failed to encode simulation frames for streaming.")
         self.latest_rgb_jpeg = rgb_encoded.tobytes()
