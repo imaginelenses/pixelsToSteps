@@ -3,7 +3,9 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+.claude/
 2406.18699v3.pdf
 *_handoff.md
 simulation/captures/
 compile_commands.json
+log2.txt
