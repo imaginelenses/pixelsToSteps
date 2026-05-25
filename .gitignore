@@ -9,3 +9,4 @@
 simulation/captures/
 compile_commands.json
 log2.txt
+.DS_Store
