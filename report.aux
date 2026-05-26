@@ -1,0 +1,92 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{lee2024}
+\citation{lee2024}
+\citation{andrychowicz2020learning}
+\citation{levine2016end}
+\citation{lee2024}
+\citation{luenberger1964}
+\citation{lee2024}
+\citation{brockman2016openai}
+\citation{lee2024}
+\citation{lee2024}
+\citation{brockman2016openai}
+\citation{lee2024}
+\@writefile{toc}{\contentsline {section}{\numberline {I}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{sec:intro}{{I}{1}{Introduction}{section.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {II}Problem Definition}{1}{section.2}\protected@file@percent }
+\newlabel{sec:problem}{{II}{1}{Problem Definition}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-A}}State Variables and Measurements}{1}{subsection.2.1}\protected@file@percent }
+\newlabel{eq:state}{{1}{1}{State Variables and Measurements}{equation.1}{}}
+\newlabel{eq:geometry}{{3}{1}{State Variables and Measurements}{equation.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-B}}Control Objective}{1}{subsection.2.2}\protected@file@percent }
+\newlabel{eq:lqr}{{4}{1}{Control Objective}{equation.4}{}}
+\citation{lee2024}
+\citation{lee2024}
+\citation{lee2024}
+\citation{lee2024}
+\citation{lee2024}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces \emph  {Top:} simulation frame at $\theta _0 = +8^\circ $. \emph  {Bottom:} corresponding binarised, zero-padded $117\!\times \!600$\,px observation~$\bm  {y}^p$ supplied to the observer. The pole silhouette is the sole sensor signal; no encoder or IMU is available.}}{2}{figure.caption.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:scenario}{{1}{2}{\emph {Top:} simulation frame at $\theta _0 = +8^\circ $. \emph {Bottom:} corresponding binarised, zero-padded $117\!\times \!600$\,px observation~$\by ^p$ supplied to the observer. The pole silhouette is the sole sensor signal; no encoder or IMU is available}{figure.caption.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {III}Data and Data Source}{2}{section.3}\protected@file@percent }
+\newlabel{sec:data}{{III}{2}{Data and Data Source}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-A}}Simulation Environment}{2}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-B}}Teacher Demonstrations}{2}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-C}}Ridge Regression Fit Quality}{2}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {IV}Method of State Estimation}{2}{section.4}\protected@file@percent }
+\newlabel{sec:method}{{IV}{2}{Method of State Estimation}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-A}}Pixel-Based Luenberger Observer (Lee et al.)}{2}{subsection.4.1}\protected@file@percent }
+\newlabel{eq:obs_lee}{{5}{2}{Pixel-Based Luenberger Observer (Lee et al.)}{equation.5}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Binarised $117\!\times \!600$\,px training frames at three initial angles. The pole silhouette shifts laterally and tilts as $x$ and $\theta $ change, providing the approximately linear pixel signal exploited by the Ridge regressor.}}{2}{figure.caption.2}\protected@file@percent }
+\newlabel{fig:data}{{2}{2}{Binarised $117\!\times \!600$\,px training frames at three initial angles. The pole silhouette shifts laterally and tilts as $x$ and $\theta $ change, providing the approximately linear pixel signal exploited by the Ridge regressor}{figure.caption.2}{}}
+\newlabel{eq:lls}{{6}{2}{Pixel-Based Luenberger Observer (Lee et al.)}{equation.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-B}}Hybrid Observer (This Work)}{2}{subsection.4.2}\protected@file@percent }
+\newlabel{eq:ridge}{{7}{2}{Hybrid Observer (This Work)}{equation.7}{}}
+\newlabel{eq:predict}{{8}{2}{Hybrid Observer (This Work)}{equation.8}{}}
+\newlabel{eq:blend}{{9}{2}{Hybrid Observer (This Work)}{equation.9}{}}
+\newlabel{eq:Leff}{{10}{2}{Hybrid Observer (This Work)}{equation.10}{}}
+\citation{lee2024}
+\citation{lee2024}
+\citation{lee2024}
+\citation{lee2024}
+\citation{lee2024}
+\citation{lee2024}
+\citation{lee2024}
+\@writefile{lot}{\contentsline {table}{\numberline {I}{\ignorespaces Observer Design Comparison}}{3}{table.caption.3}\protected@file@percent }
+\newlabel{tab:compare}{{I}{3}{Observer Design Comparison}{table.caption.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces System block diagram. All signals are updated at 60~Hz.}}{3}{figure.caption.4}\protected@file@percent }
+\newlabel{fig:blockdiagram}{{3}{3}{System block diagram. All signals are updated at 60~Hz}{figure.caption.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-C}}Comparison to Prior Work}{3}{subsection.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-D}}System Block Diagram}{3}{subsection.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {V}Experiments and Results}{3}{section.5}\protected@file@percent }
+\newlabel{sec:results}{{V}{3}{Experiments and Results}{section.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-A}}Evaluation Protocol}{3}{subsection.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-B}}Performance Metric}{3}{subsection.5.2}\protected@file@percent }
+\newlabel{eq:estab}{{11}{3}{Performance Metric}{equation.11}{}}
+\newlabel{eq:success}{{12}{3}{Performance Metric}{equation.12}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Stabilisation performance vs.\ training-set size (100 trials per point, mismatched plant). \emph  {Top:} median $e_{\mathrm  {stab}}$ (Eq.~\eqref  {eq:estab}) with 5th--95th percentile band. \emph  {Bottom:} paper-success rate (Eq.~\eqref  {eq:success}). Both curves plateau near 150~demos; the main gain occurs between 100--140~demos where the tail of the error distribution collapses.}}{3}{figure.caption.5}\protected@file@percent }
+\newlabel{fig:fig1}{{4}{3}{Stabilisation performance vs.\ training-set size (100 trials per point, mismatched plant). \emph {Top:} median $e_{\mathrm {stab}}$ (Eq.~\eqref {eq:estab}) with 5th--95th percentile band. \emph {Bottom:} paper-success rate (Eq.~\eqref {eq:success}). Both curves plateau near 150~demos; the main gain occurs between 100--140~demos where the tail of the error distribution collapses}{figure.caption.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-C}}Stabilisation Performance vs.\ Training Data}{3}{subsection.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-D}}Single-Rollout Time Histories}{3}{subsection.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-E}}Effective Gain and Spatial Interpretation}{3}{subsection.5.5}\protected@file@percent }
+\citation{lee2024}
+\citation{lee2024}
+\citation{lee2024}
+\citation{lee2024}
+\bibcite{lee2024}{1}
+\bibcite{brockman2016openai}{2}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Time histories for a single rollout at $\theta _0=8^\circ $ (150-demo observer, mismatched plant). \emph  {Top:} cart position; \emph  {Middle:} pole angle. True state (solid) vs.\ observer estimate (dashed). \emph  {Bottom:} applied control force vs.\ teacher anticipated command. The pole angle is tracked closely; cart position error accumulates but remains within the LQR basin.}}{4}{figure.caption.6}\protected@file@percent }
+\newlabel{fig:fig3}{{5}{4}{Time histories for a single rollout at $\theta _0=8^\circ $ (150-demo observer, mismatched plant). \emph {Top:} cart position; \emph {Middle:} pole angle. True state (solid) vs.\ observer estimate (dashed). \emph {Bottom:} applied control force vs.\ teacher anticipated command. The pole angle is tracked closely; cart position error accumulates but remains within the LQR basin}{figure.caption.6}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces Observer Performance at 150 Training Demos  (100 Evaluation Trials, Mismatched Plant)}}{4}{table.caption.7}\protected@file@percent }
+\newlabel{tab:results}{{II}{4}{Observer Performance at 150 Training Demos\\ (100 Evaluation Trials, Mismatched Plant)}{table.caption.7}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-F}}Quantitative Summary}{4}{subsection.5.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {VI}Conclusions}{4}{section.6}\protected@file@percent }
+\newlabel{sec:conclusions}{{VI}{4}{Conclusions}{section.6}{}}
+\@writefile{toc}{\contentsline {section}{References}{4}{section*.8}\protected@file@percent }
+\bibcite{andrychowicz2020learning}{3}
+\bibcite{levine2016end}{4}
+\bibcite{luenberger1964}{5}
+\gdef \@abspage@last{5}
